@@ -1,6 +1,6 @@
 [package]
 name = "pylibsql"
-version = "0.1.11"
+version = "0.1.14"
 edition = "2024"
 
 [lib]
@@ -8,8 +8,8 @@ name = "aiolibsql"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.25.1"
-pyo3-asyncio = { version = "*", features = ["tokio-runtime"] }
+pyo3 = "0.23"
+pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
 libsql = { version = "0.9.22", features = ["encryption"]  }
 tokio = { version = "1.47.0", features = [ "rt-multi-thread", "sync" ] }
 tracing-subscriber = "0.3.19"
@@ -17,4 +17,4 @@ tracing-subscriber = "0.3.19"
 [build-dependencies]
 version_check = "0.9.5"
 # used where logic has to be version/distribution specific, e.g. pypy
-pyo3-build-config = { version = "0.25.1" }
+pyo3-build-config = { version = "0.23" }

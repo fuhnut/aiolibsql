@@ -1,19 +1,15 @@
-# Local
+# Encryption
 
-This example demonstrates how to create and use an encrypted SQLite database with libSQL.
+This example demonstrates how to use AES encryption with a local database.
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install libsql
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
 ```
 
 ## Running
 
-Execute the example:
-
 ```bash
 python3 main.py
 ```
-
-This will setup an encrypted SQLite database, execute a batch of SQL statements, and then query the results.

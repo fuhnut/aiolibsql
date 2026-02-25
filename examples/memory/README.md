@@ -1,19 +1,15 @@
-# Local
+# In-Memory Database
 
-This example demonstrates how to use libSQL with an in-memory SQLite database.
+This example demonstrates using an in-memory SQLite database (`:memory:`).
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install libsql
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
 ```
 
 ## Running
 
-Execute the example:
-
 ```bash
 python3 main.py
 ```
-
-This will create an in-memory SQLite database, insert some data, and then query the results.

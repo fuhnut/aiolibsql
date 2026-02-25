@@ -1,16 +1,22 @@
-import libsql
+import asyncio
+import aiolibsql
 
-conn = libsql.connect("local.db")
-cur = conn.cursor()
+async def main():
+    async with await aiolibsql.connect("local.db") as conn:
+        cur = await conn.cursor()
 
-cur.executescript(
-    """
-        DROP TABLE IF EXISTS users;
-        CREATE TABLE users (id INTEGER, name TEXT);
-        INSERT INTO users VALUES (1, 'first@example.org');
-        INSERT INTO users VALUES (2, 'second@example.org');
-        INSERT INTO users VALUES (3, 'third@example.org');
-    """
-)
+        await cur.executescript(
+            """
+                DROP TABLE IF EXISTS users;
+                CREATE TABLE users (id INTEGER, name TEXT);
+                INSERT INTO users VALUES (1, 'first@example.org');
+                INSERT INTO users VALUES (2, 'second@example.org');
+                INSERT INTO users VALUES (3, 'third@example.org');
+            """
+        )
 
-print(conn.execute("select * from users").fetchall())
+        cursor = await conn.execute("select * from users")
+        print(await cursor.fetchall())
+
+if __name__ == "__main__":
+    asyncio.run(main())

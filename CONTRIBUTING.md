@@ -1,41 +1,37 @@
-# Contributing to libSQL Python SDK
+# Contributing to aiolibsql
 
 ## Developing
 
 Setup the development environment:
 
 ```sh
-python3 -m venv .env
-source .env/bin/activate
-pip3 install maturin pyperf pytest
+python3 -m venv .venv
+source .venv/bin/activate
+pip install maturin pytest pytest-asyncio
 ```
 
-Or you can use NIX to drop you into a shell with everything installed
-
-```
-nix-shell
-```
-
-Build the development version and use it:
-
-```
-maturin develop && python3 example.py
-```
-
-Run the tests:
+Build the development version:
 
 ```sh
-pytest
+maturin develop
 ```
 
-Run the libSQL benchmarks:
+Run the quick example:
 
 ```sh
-python3 perf-libsql.py
+python example.py
 ```
 
-Run the SQLite benchmarks for comparison:
+## Testing
+
+Run the comprehensive CLI test:
 
 ```sh
-python3 perf-sqlite3.py
+python cli_test.py
+```
+
+Run the pytest suite:
+
+```sh
+pytest tests/
 ```

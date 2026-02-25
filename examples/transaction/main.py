@@ -1,15 +1,19 @@
-import libsql
+import asyncio
+import aiolibsql
 
-conn = libsql.connect("local.db")
-cur = conn.cursor()
+async def main():
+    async with await aiolibsql.connect("local.db") as conn:
+        await conn.execute("DROP TABLE IF EXISTS users")
+        await conn.execute("CREATE TABLE users (name TEXT);")
+        await conn.execute("INSERT INTO users VALUES ('first@example.com');")
+        await conn.execute("INSERT INTO users VALUES ('second@example.com');")
 
-conn.execute("DROP TABLE IF EXISTS users")
-conn.execute("CREATE TABLE users (name TEXT);")
-conn.execute("INSERT INTO users VALUES ('first@example.com');")
-conn.execute("INSERT INTO users VALUES ('second@example.com');")
+        await conn.rollback()
 
-conn.rollback()
+        await conn.execute("INSERT INTO users VALUES ('third@example.com');")
 
-conn.execute("INSERT INTO users VALUES ('third@example.com');")
+        cursor = await conn.execute("select * from users")
+        print(await cursor.fetchall())
 
-print(conn.execute("select * from users").fetchall())
+if __name__ == "__main__":
+    asyncio.run(main())

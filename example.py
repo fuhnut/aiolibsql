@@ -1,13 +1,13 @@
-import libsql
+import asyncio
+import aiolibsql
 
-con = libsql.connect("hello.db", sync_url="http://localhost:8080",
-                                  auth_token="")
+async def main():
+    async with await aiolibsql.connect("hello.db") as conn:
+        await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER, email TEXT);")
+        await conn.execute("INSERT INTO users VALUES (1, 'alice@example.com')")
 
-con.sync()
+        cursor = await conn.execute("SELECT * FROM users")
+        print(await cursor.fetchall())
 
-cur = con.cursor()
-
-cur.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER, email TEXT);")
-cur.execute("INSERT INTO users VALUES (1, 'penberg@iki.fi')")
-
-print(cur.execute("SELECT * FROM users").fetchone())
+if __name__ == "__main__":
+    asyncio.run(main())

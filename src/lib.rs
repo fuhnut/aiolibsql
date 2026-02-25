@@ -4,29 +4,34 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 use std::time::Duration;
-use pyo3_asyncio::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::future_into_py;
+
 
 const LEGACY_TRANSACTION_CONTROL: i32 = -1;
+const VERSION: &str = "0.1.14-stable";
 
-#[derive(Clone)]
-enum ListOrTuple<'py> {
-    List(Bound<'py, PyList>),
-    Tuple(Bound<'py, PyTuple>),
+enum ListOrTuple {
+    List(Py<PyList>),
+    Tuple(Py<PyTuple>),
 }
 
-struct ListOrTupleIterator<'py> {
-    index: usize,
-    inner: ListOrTuple<'py>,
+impl<'py> FromPyObject<'py> for ListOrTuple {
+    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
+        if let Ok(list) = ob.downcast::<PyList>() {
+            Ok(ListOrTuple::List(list.clone().unbind()))
+        } else if let Ok(tuple) = ob.downcast::<PyTuple>() {
+            Ok(ListOrTuple::Tuple(tuple.clone().unbind()))
+        } else {
+            Err(PyValueError::new_err("Expected a list or tuple for parameters"))
+        }
+    }
 }
 
-fn to_py_err(error: libsql_core::errors::Error) -> PyErr {
-    let msg = match error {
-        libsql_core::Error::SqliteFailure(_, err) => err,
-        _ => error.to_string(),
-    };
-    PyValueError::new_err(msg)
+fn to_py_err<E: std::fmt::Display>(error: E) -> PyErr {
+    PyValueError::new_err(error.to_string())
 }
 
 fn is_remote_path(path: &str) -> bool {
@@ -34,9 +39,9 @@ fn is_remote_path(path: &str) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (database, timeout=5.0, isolation_level="DEFERRED".to_string(), _check_same_thread=true, _uri=false, sync_url=None, sync_interval=None, offline=false, auth_token="", encryption_key=None, autocommit = LEGACY_TRANSACTION_CONTROL))]
-fn connect(
-    py: Python<'_>,
+#[pyo3(signature = (database, timeout=5.0, isolation_level="DEFERRED".to_string(), _check_same_thread=true, _uri=false, sync_url=None, sync_interval=None, offline=false, auth_token=None, encryption_key=None, autocommit=LEGACY_TRANSACTION_CONTROL))]
+fn connect<'py>(
+    py: Python<'py>,
     database: String,
     timeout: f64,
     isolation_level: Option<String>,
@@ -45,10 +50,11 @@ fn connect(
     sync_url: Option<String>,
     sync_interval: Option<f64>,
     offline: bool,
-    auth_token: String,
+    auth_token: Option<String>,
     encryption_key: Option<String>,
     autocommit: i32,
-) -> PyResult<Bound<'_, PyAny>> {
+) -> PyResult<Bound<'py, PyAny>> {
+    let auth_token = auth_token.unwrap_or_default();
     future_into_py(py, async move {
         let ver = env!("CARGO_PKG_VERSION");
         let ver = format!("libsql-python-rpc-{ver}");
@@ -59,69 +65,45 @@ fn connect(
             }
             None => None,
         };
-
         let db = if is_remote_path(&database) {
-            libsql_core::Database::open_remote_internal(database, &auth_token, ver)
-                .map_err(to_py_err)?
+            libsql_core::Database::open_remote_internal(database, auth_token.clone(), ver).map_err(to_py_err)?
         } else {
             match sync_url {
                 Some(sync_url) => {
                     let sync_interval = sync_interval.map(|i| std::time::Duration::from_secs_f64(i));
-                    let mut builder = libsql_core::Builder::new_synced_database(
-                        database,
-                        sync_url,
-                        auth_token.to_string(),
-                    );
+                    let mut builder = libsql_core::Builder::new_synced_database(database, sync_url, auth_token.clone());
                     if encryption_config.is_some() {
-                        return Err(PyValueError::new_err(
-                            "encryption is not supported for synced databases",
-                        ));
+                        return Err(PyValueError::new_err("encryption is not supported for synced databases"));
                     }
-                    if let Some(sync_interval) = sync_interval {
-                        builder = builder.sync_interval(sync_interval);
-                    }
+                    if let Some(sync_interval) = sync_interval { builder = builder.sync_interval(sync_interval); }
                     builder = builder.remote_writes(!offline);
                     builder.build().await.map_err(to_py_err)?
                 }
                 None => {
                     let mut builder = libsql_core::Builder::new_local(database);
-                    if let Some(config) = encryption_config {
-                        builder = builder.encryption_config(config);
-                    }
+                    if let Some(config) = encryption_config { builder = builder.encryption_config(config); }
                     builder.build().await.map_err(to_py_err)?
                 }
             }
         };
-
         let conn = db.connect().map_err(to_py_err)?;
         conn.busy_timeout(Duration::from_secs_f64(timeout)).map_err(to_py_err)?;
-        
-        let autocommit = if autocommit == LEGACY_TRANSACTION_CONTROL {
-            isolation_level.is_none() as i32
-        } else {
-            if autocommit != 1 && autocommit != 0 {
-                return Err(PyValueError::new_err(
-                    "autocommit must be True, False, or sqlite3.LEGACY_TRANSACTION_CONTROL",
-                ));
-            }
-            autocommit
-        };
-
+        let autocommit_val = if autocommit == LEGACY_TRANSACTION_CONTROL { isolation_level.is_none() as i32 } else { autocommit };
         Ok(Connection {
-            db,
+            db: Arc::new(db),
             conn: Arc::new(Mutex::new(Some(conn))),
             isolation_level,
-            autocommit,
+            autocommit: autocommit_val,
         })
     })
 }
 
 #[pyclass]
-#[derive(Clone)]
 pub struct Connection {
-    db: libsql_core::Database,
+    db: Arc<libsql_core::Database>,
     conn: Arc<Mutex<Option<libsql_core::Connection>>>,
     isolation_level: Option<String>,
+    #[pyo3(get, set)]
     autocommit: i32,
 }
 
@@ -130,27 +112,23 @@ impl Connection {
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn_arc = self.conn.clone();
         future_into_py(py, async move {
-            let mut conn = conn_arc.lock().await;
-            if let Some(c) = conn.take() {
-                drop(c);
-            }
+            if let Some(c) = conn_arc.lock().await.take() { drop(c); }
             Ok(())
         })
     }
-
     fn cursor(&self) -> PyResult<Cursor> {
         Ok(Cursor {
             arraysize: 1,
             conn: self.conn.clone(),
             stmt: Arc::new(Mutex::new(None)),
             rows: Arc::new(Mutex::new(None)),
-            rowcount: Arc::new(Mutex::new(0)),
+            rowcount: Arc::new(AtomicI64::new(0)),
+            last_insert_rowid: Arc::new(AtomicI64::new(0)),
             isolation_level: self.isolation_level.clone(),
             autocommit: self.autocommit,
             done: Arc::new(Mutex::new(false)),
         })
     }
-
     fn sync<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.db.clone();
         future_into_py(py, async move {
@@ -158,162 +136,86 @@ impl Connection {
             Ok(())
         })
     }
-
     fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn_arc = self.conn.clone();
         future_into_py(py, async move {
-            let conn_guard = conn_arc.lock().await;
-            if let Some(conn) = conn_guard.as_ref() {
-                if !conn.is_autocommit() {
-                    conn.execute("COMMIT", ()).await.map_err(to_py_err)?;
-                }
+            let guard = conn_arc.lock().await;
+            if let Some(conn) = guard.as_ref() {
+                if !conn.is_autocommit() { conn.execute("COMMIT", ()).await.map_err(to_py_err)?; }
             }
             Ok(())
         })
     }
-
     fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let conn_arc = self.conn.clone();
         future_into_py(py, async move {
-            let conn_guard = conn_arc.lock().await;
-            if let Some(conn) = conn_guard.as_ref() {
-                if !conn.is_autocommit() {
-                    conn.execute("ROLLBACK", ()).await.map_err(to_py_err)?;
-                }
+            let guard = conn_arc.lock().await;
+            if let Some(conn) = guard.as_ref() {
+                if !conn.is_autocommit() { conn.execute("ROLLBACK", ()).await.map_err(to_py_err)?; }
             }
             Ok(())
         })
     }
-
     #[pyo3(signature = (sql, parameters=None))]
-    fn execute<'py>(
-        &self,
-        py: Python<'py>,
-        sql: String,
-        parameters: Option<ListOrTuple<'py>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn execute<'py>(&self, py: Python<'py>, sql: String, parameters: Option<ListOrTuple>) -> PyResult<Bound<'py, PyAny>> {
         let cursor = self.cursor()?;
-        let cursor_py = cursor.clone().into_py(py);
-        let params = extract_parameters(parameters)?;
-        
-        let conn_arc = cursor.conn.clone();
-        let stmt_arc = cursor.stmt.clone();
-        let rows_arc = cursor.rows.clone();
-        let rowcount_arc = cursor.rowcount.clone();
-        let autocommit = cursor.autocommit;
-        let isolation_level = cursor.isolation_level.clone();
-
+        let cursor_py = Py::new(py, cursor.clone())?;
+        let params = extract_parameters(py, parameters)?;
+        let (conn, stmt, rows, rc, rid, ac, isl) = (cursor.conn.clone(), cursor.stmt.clone(), cursor.rows.clone(), cursor.rowcount.clone(), cursor.last_insert_rowid.clone(), cursor.autocommit, cursor.isolation_level.clone());
         future_into_py(py, async move {
-            execute_async(
-                conn_arc, stmt_arc, rows_arc, rowcount_arc,
-                autocommit, isolation_level, sql, params
-            ).await?;
-            Python::with_gil(|py| Ok(cursor_py.into_bound(py)))
+            let (changes, id) = execute_async(conn, stmt, rows, ac, isl, sql, params).await?;
+            rc.store(changes, Ordering::SeqCst); rid.store(id, Ordering::SeqCst);
+            Ok(cursor_py)
         })
     }
-
     #[pyo3(signature = (sql, parameters=None))]
-    fn executemany<'py>(
-        &self,
-        py: Python<'py>,
-        sql: String,
-        parameters: Option<&Bound<'py, PyList>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn executemany<'py>(&self, py: Python<'py>, sql: String, parameters: Option<Bound<'py, PyList>>) -> PyResult<Bound<'py, PyAny>> {
         let cursor = self.cursor()?;
-        let cursor_py = cursor.clone().into_py(py);
-        
-        let mut params_list = vec![];
-        if let Some(parameters) = parameters {
-            for param in parameters.iter() {
-                let lt = param.extract::<ListOrTuple>()?;
-                params_list.push(extract_parameters(Some(lt))?);
-            }
+        let cursor_py = Py::new(py, cursor.clone())?;
+        let mut p_list = vec![];
+        if let Some(ps) = parameters {
+            for p in ps.iter() { p_list.push(extract_parameters(py, Some(p.extract::<ListOrTuple>()?))?); }
         }
-        
-        let conn_arc = cursor.conn.clone();
-        let stmt_arc = cursor.stmt.clone();
-        let rows_arc = cursor.rows.clone();
-        let rowcount_arc = cursor.rowcount.clone();
-        let autocommit = cursor.autocommit;
-        let isolation_level = cursor.isolation_level.clone();
-
+        let (conn, stmt, rows, rc, rid, ac, isl) = (cursor.conn.clone(), cursor.stmt.clone(), cursor.rows.clone(), cursor.rowcount.clone(), cursor.last_insert_rowid.clone(), cursor.autocommit, cursor.isolation_level.clone());
         future_into_py(py, async move {
-            for params in params_list {
-                execute_async(
-                    conn_arc.clone(), stmt_arc.clone(), rows_arc.clone(), rowcount_arc.clone(),
-                    autocommit, isolation_level.clone(), sql.clone(), params
-                ).await?;
+            let (mut tc, mut lr) = (0, 0);
+            for p in p_list {
+                let (c, r) = execute_async(conn.clone(), stmt.clone(), rows.clone(), ac, isl.clone(), sql.clone(), p).await?;
+                tc += c; lr = r;
             }
-            Python::with_gil(|py| Ok(cursor_py.into_bound(py)))
+            rc.store(tc, Ordering::SeqCst); rid.store(lr, Ordering::SeqCst);
+            Ok(cursor_py)
         })
     }
-
     fn executescript<'py>(&self, py: Python<'py>, script: String) -> PyResult<Bound<'py, PyAny>> {
         let cursor = self.cursor()?;
-        let cursor_py = cursor.clone().into_py(py);
+        let cursor_py = Py::new(py, cursor.clone())?;
         let conn_arc = cursor.conn.clone();
-
         future_into_py(py, async move {
-            let conn_guard = conn_arc.lock().await;
-            if let Some(conn) = conn_guard.as_ref() {
-                conn.execute_batch(&script).await.map_err(to_py_err)?;
-            }
-            Python::with_gil(|py| Ok(cursor_py.into_bound(py)))
+            let guard = conn_arc.lock().await;
+            if let Some(conn) = guard.as_ref() { conn.execute_batch(&script).await.map_err(to_py_err)?; }
+            Ok(cursor_py)
         })
     }
-
     #[getter]
-    fn isolation_level(&self) -> Option<String> {
-        self.isolation_level.clone()
-    }
-
+    fn isolation_level(&self) -> Option<String> { self.isolation_level.clone() }
     #[getter]
     fn in_transaction(&self) -> PyResult<bool> {
-        Ok(self.autocommit == 0 || self.isolation_level.is_some())
+        let guard = self.conn.blocking_lock();
+        if let Some(conn) = guard.as_ref() { Ok(!conn.is_autocommit() || self.autocommit == 0) } else { Ok(false) }
     }
-
-    #[getter]
-    fn get_autocommit(&self) -> PyResult<i32> {
-        Ok(self.autocommit)
+    fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move { Ok(slf) })
     }
-
-    #[setter]
-    fn set_autocommit(&mut self, autocommit: i32) -> PyResult<()> {
-        if autocommit != LEGACY_TRANSACTION_CONTROL && autocommit != 1 && autocommit != 0 {
-            return Err(PyValueError::new_err(
-                "autocommit must be True, False, or sqlite3.LEGACY_TRANSACTION_CONTROL",
-            ));
-        }
-        self.autocommit = autocommit;
-        Ok(())
-    }
-
-    fn __aenter__<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let slf_py = slf.into_py(py);
-        future_into_py(py, async move {
-            Python::with_gil(|py| Ok(slf_py.into_bound(py)))
-        })
-    }
-
     #[pyo3(signature = (exc_type=None, _exc_val=None, _exc_tb=None))]
-    fn __aexit__<'py>(
-        &self,
-        py: Python<'py>,
-        exc_type: Option<PyObject>,
-        _exc_val: Option<PyObject>,
-        _exc_tb: Option<PyObject>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn __aexit__<'py>(&self, py: Python<'py>, exc_type: Option<PyObject>, _exc_val: Option<PyObject>, _exc_tb: Option<PyObject>) -> PyResult<Bound<'py, PyAny>> {
         let conn_arc = self.conn.clone();
         let is_error = exc_type.is_some();
         future_into_py(py, async move {
-            let conn_guard = conn_arc.lock().await;
-            if let Some(conn) = conn_guard.as_ref() {
+            let guard = conn_arc.lock().await;
+            if let Some(conn) = guard.as_ref() {
                 if !conn.is_autocommit() {
-                    if is_error {
-                        let _ = conn.execute("ROLLBACK", ()).await;
-                    } else {
-                        let _ = conn.execute("COMMIT", ()).await;
-                    }
+                    if is_error { let _ = conn.execute("ROLLBACK", ()).await; } else { let _ = conn.execute("COMMIT", ()).await; }
                 }
             }
             Ok(false)
@@ -329,7 +231,8 @@ pub struct Cursor {
     conn: Arc<Mutex<Option<libsql_core::Connection>>>,
     stmt: Arc<Mutex<Option<libsql_core::Statement>>>,
     rows: Arc<Mutex<Option<libsql_core::Rows>>>,
-    rowcount: Arc<Mutex<i64>>,
+    rowcount: Arc<AtomicI64>,
+    last_insert_rowid: Arc<AtomicI64>,
     done: Arc<Mutex<bool>>,
     isolation_level: Option<String>,
     autocommit: i32,
@@ -338,253 +241,189 @@ pub struct Cursor {
 #[pymethods]
 impl Cursor {
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let conn_arc = self.conn.clone();
-        let stmt_arc = self.stmt.clone();
-        let rows_arc = self.rows.clone();
+        let (c, s, r) = (self.conn.clone(), self.stmt.clone(), self.rows.clone());
         future_into_py(py, async move {
-            conn_arc.lock().await.take();
-            stmt_arc.lock().await.take();
-            rows_arc.lock().await.take();
+            c.lock().await.take(); s.lock().await.take(); r.lock().await.take();
             Ok(())
         })
     }
-
     #[pyo3(signature = (sql, parameters=None))]
-    fn execute<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        sql: String,
-        parameters: Option<ListOrTuple<'py>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let params = extract_parameters(parameters)?;
-        let conn_arc = slf.conn.clone();
-        let stmt_arc = slf.stmt.clone();
-        let rows_arc = slf.rows.clone();
-        let rowcount_arc = slf.rowcount.clone();
-        let autocommit = slf.autocommit;
-        let isolation_level = slf.isolation_level.clone();
-        let slf_py = slf.into_py(py);
-        
+    fn execute<'py>(slf: Py<Self>, py: Python<'py>, sql: String, parameters: Option<ListOrTuple>) -> PyResult<Bound<'py, PyAny>> {
+        let params = extract_parameters(py, parameters)?;
+        let (conn, stmt, rows, rc, rid, ac, isl) = {
+            let b = slf.borrow(py);
+            (b.conn.clone(), b.stmt.clone(), b.rows.clone(), b.rowcount.clone(), b.last_insert_rowid.clone(), b.autocommit, b.isolation_level.clone())
+        };
         future_into_py(py, async move {
-            execute_async(
-                conn_arc, stmt_arc, rows_arc, rowcount_arc,
-                autocommit, isolation_level, sql, params
-            ).await?;
-            Python::with_gil(|py| Ok(slf_py.into_bound(py)))
+            let (c, r) = execute_async(conn, stmt, rows, ac, isl, sql, params).await?;
+            rc.store(c, Ordering::SeqCst); rid.store(r, Ordering::SeqCst);
+            Ok(slf)
         })
     }
-
     #[pyo3(signature = (sql, parameters=None))]
-    fn executemany<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        sql: String,
-        parameters: Option<&Bound<'py, PyList>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let mut params_list = vec![];
-        if let Some(parameters) = parameters {
-            for param in parameters.iter() {
-                let lt = param.extract::<ListOrTuple>()?;
-                params_list.push(extract_parameters(Some(lt))?);
-            }
+    fn executemany<'py>(slf: Py<Self>, py: Python<'py>, sql: String, parameters: Option<Bound<'py, PyList>>) -> PyResult<Bound<'py, PyAny>> {
+        let mut p_list = vec![];
+        if let Some(ps) = parameters {
+            for p in ps.iter() { p_list.push(extract_parameters(py, Some(p.extract::<ListOrTuple>()?))?); }
         }
-        
-        let conn_arc = slf.conn.clone();
-        let stmt_arc = slf.stmt.clone();
-        let rows_arc = slf.rows.clone();
-        let rowcount_arc = slf.rowcount.clone();
-        let autocommit = slf.autocommit;
-        let isolation_level = slf.isolation_level.clone();
-        let slf_py = slf.into_py(py);
-        
+        let (conn, stmt, rows, rc, rid, ac, isl) = {
+            let b = slf.borrow(py);
+            (b.conn.clone(), b.stmt.clone(), b.rows.clone(), b.rowcount.clone(), b.last_insert_rowid.clone(), b.autocommit, b.isolation_level.clone())
+        };
         future_into_py(py, async move {
-            for params in params_list {
-                execute_async(
-                    conn_arc.clone(), stmt_arc.clone(), rows_arc.clone(), rowcount_arc.clone(),
-                    autocommit, isolation_level.clone(), sql.clone(), params
-                ).await?;
+            let (mut tc, mut lr) = (0, 0);
+            for p in p_list {
+                let (c, r) = execute_async(conn.clone(), stmt.clone(), rows.clone(), ac, isl.clone(), sql.clone(), p).await?;
+                tc += c; lr = r;
             }
-            Python::with_gil(|py| Ok(slf_py.into_bound(py)))
+            rc.store(tc, Ordering::SeqCst); rid.store(lr, Ordering::SeqCst);
+            Ok(slf)
         })
     }
-
-    fn executescript<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        script: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let slf_py = slf.into_py(py);
-        let conn_arc = slf.conn.clone();
-        
+    fn executescript<'py>(slf: Py<Self>, py: Python<'py>, script: String) -> PyResult<Bound<'py, PyAny>> {
+        let conn_arc = slf.borrow(py).conn.clone();
         future_into_py(py, async move {
-            let conn_guard = conn_arc.lock().await;
-            if let Some(conn) = conn_guard.as_ref() {
-                conn.execute_batch(&script).await.map_err(to_py_err)?;
-            }
-            Python::with_gil(|py| Ok(slf_py.into_bound(py)))
+            let guard = conn_arc.lock().await;
+            if let Some(conn) = guard.as_ref() { conn.execute_batch(&script).await.map_err(to_py_err)?; }
+            Ok(slf)
         })
     }
-
     #[getter]
-    fn description(&self, py: Python<'_>) -> PyResult<Option<Bound<'_, PyTuple>>> {
-        let stmt_guard = self.stmt.try_lock();
-        if let Ok(stmt_ref) = stmt_guard {
-            if let Some(stmt) = stmt_ref.as_ref() {
-                let mut elements: Vec<Py<PyAny>> = vec![];
-                for column in stmt.columns() {
-                    let name = column.name();
-                    let element = (
-                        name,
-                        py.None(),
-                        py.None(),
-                        py.None(),
-                        py.None(),
-                        py.None(),
-                        py.None(),
-                    )
-                        .into_pyobject(py)
-                        .unwrap();
-                    elements.push(element.into());
-                }
-                return Ok(Some(PyTuple::new(py, elements)?));
+    fn description(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let guard = self.stmt.blocking_lock();
+        if let Some(stmt) = guard.as_ref() {
+            let mut elements: Vec<PyObject> = vec![];
+            for c in stmt.columns() {
+                let e = (c.name(), py.None(), py.None(), py.None(), py.None(), py.None(), py.None()).into_pyobject(py)?.into_any().unbind();
+                elements.push(e);
             }
-        }
-        Ok(None)
+            Ok(Some(PyTuple::new(py, elements)?.unbind().into()))
+        } else { Ok(None) }
     }
-
     fn fetchone<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rows_arc = self.rows.clone();
         future_into_py(py, async move {
-            let mut rows_guard = rows_arc.lock().await;
-            if let Some(rows) = rows_guard.as_mut() {
-                let row = rows.next().await.map_err(to_py_err)?;
-                Python::with_gil(|py| {
-                    if let Some(row) = row {
-                        let py_row = convert_row(py, row, rows.column_count())?;
-                        Ok(py_row.into_any())
-                    } else {
-                        Ok(py.None().into_bound(py))
-                    }
-                })
-            } else {
-                Python::with_gil(|py| Ok(py.None().into_bound(py)))
+            let mut guard = rows_arc.lock().await;
+            if let Some(rows) = guard.as_mut() {
+                if let Some(r) = rows.next().await.map_err(to_py_err)? {
+                    let cc = rows.column_count();
+                    let mut vals = Vec::with_capacity(cc as usize);
+                    for i in 0..cc { vals.push(r.get_value(i).map_err(to_py_err)?); }
+                    drop(guard);
+                    return Python::with_gil(|py| {
+                        let mut py_vals = vec![];
+                        for v in vals { py_vals.push(convert_value(py, v)?); }
+                        Ok(PyTuple::new(py, py_vals)?.unbind().into_any())
+                    });
+                }
             }
+            Python::with_gil(|py| Ok(py.None()))
         })
     }
-
     #[pyo3(signature = (size=None))]
-    fn fetchmany<'py>(&self, py: Python<'py>, size: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
-        let size = size.unwrap_or(self.arraysize as i64);
-        let rows_arc = self.rows.clone();
-        let done_arc = self.done.clone();
-        
+    fn fetchmany<'py>(&self, py: Python<'py>, size: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+        let (rows_arc, done_arc, arraysize) = (self.rows.clone(), self.done.clone(), self.arraysize);
         future_into_py(py, async move {
-            let mut rows_guard = rows_arc.lock().await;
-            let mut done_guard = done_arc.lock().await;
-            if let Some(rows) = rows_guard.as_mut() {
-                let mut all_rows = vec![];
-                if !*done_guard {
+            let size = size.unwrap_or(arraysize);
+            let mut guard = rows_arc.lock().await;
+            let mut data = vec![];
+            if let Some(rows) = guard.as_mut() {
+                if !*done_arc.lock().await {
+                    let cc = rows.column_count();
                     for _ in 0..size {
-                        let row = rows.next().await.map_err(to_py_err)?;
-                        if let Some(r) = row {
-                            all_rows.push(r);
-                        } else {
-                            *done_guard = true;
-                            break;
+                        match rows.next().await.map_err(to_py_err)? {
+                            Some(r) => {
+                                let mut row = Vec::with_capacity(cc as usize);
+                                for i in 0..cc { row.push(r.get_value(i).map_err(to_py_err)?); }
+                                data.push(row);
+                            }
+                            None => { *done_arc.lock().await = true; break; }
                         }
                     }
                 }
-                Python::with_gil(|py| {
-                    let mut elements: Vec<Py<PyAny>> = vec![];
-                    for row in all_rows {
-                        elements.push(convert_row(py, row, rows.column_count())?.into());
-                    }
-                    Ok(PyList::new(py, elements)?.into_any())
-                })
-            } else {
-                Python::with_gil(|py| Ok(py.None().into_bound(py)))
             }
+            drop(guard);
+            Python::with_gil(|py| {
+                let mut elements = vec![];
+                for row in data {
+                    let mut py_row = vec![];
+                    for v in row { py_row.push(convert_value(py, v)?); }
+                    elements.push(PyTuple::new(py, py_row)?.unbind().into_any());
+                }
+                Ok(PyList::new(py, elements)?.unbind().into_any())
+            })
         })
     }
-
     fn fetchall<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rows_arc = self.rows.clone();
         future_into_py(py, async move {
-            let mut rows_guard = rows_arc.lock().await;
-            if let Some(rows) = rows_guard.as_mut() {
-                let mut all_rows = vec![];
-                while let Some(row) = rows.next().await.map_err(to_py_err)? {
-                    all_rows.push(row);
+            let mut guard = rows_arc.lock().await;
+            let mut data = vec![];
+            if let Some(rows) = guard.as_mut() {
+                let cc = rows.column_count();
+                while let Some(r) = rows.next().await.map_err(to_py_err)? {
+                    let mut row = Vec::with_capacity(cc as usize);
+                    for i in 0..cc { row.push(r.get_value(i).map_err(to_py_err)?); }
+                    data.push(row);
                 }
-                Python::with_gil(|py| {
-                    let mut elements: Vec<Py<PyAny>> = vec![];
-                    for row in all_rows {
-                        elements.push(convert_row(py, row, rows.column_count())?.into());
-                    }
-                    Ok(PyList::new(py, elements)?.into_any())
-                })
-            } else {
-                Python::with_gil(|py| Ok(py.None().into_bound(py)))
             }
+            drop(guard);
+            Python::with_gil(|py| {
+                let mut elements = vec![];
+                for row in data {
+                    let mut py_row = vec![];
+                    for v in row { py_row.push(convert_value(py, v)?); }
+                    elements.push(PyTuple::new(py, py_row)?.unbind().into_any());
+                }
+                Ok(PyList::new(py, elements)?.unbind().into_any())
+            })
         })
     }
-
     #[getter]
-    fn lastrowid(&self) -> PyResult<Option<i64>> {
-        let stmt_guard = self.stmt.try_lock();
-        if let Ok(stmt_ref) = stmt_guard {
-            if stmt_ref.is_some() {
-                let conn_guard = self.conn.try_lock();
-                if let Ok(conn_ref) = conn_guard {
-                    if let Some(conn) = conn_ref.as_ref() {
-                        return Ok(Some(conn.last_insert_rowid()));
-                    }
-                }
-            }
-        }
-        Ok(None)
-    }
-
+    fn lastrowid(&self) -> PyResult<i64> { Ok(self.last_insert_rowid.load(Ordering::SeqCst)) }
     #[getter]
-    fn rowcount(&self) -> PyResult<i64> {
-        let rowcount_guard = self.rowcount.try_lock();
-        if let Ok(rc) = rowcount_guard {
-            Ok(*rc)
-        } else {
-            Ok(0)
-        }
-    }
+    fn rowcount(&self) -> PyResult<i64> { Ok(self.rowcount.load(Ordering::SeqCst)) }
 }
 
 async fn begin_transaction(conn: &libsql_core::Connection) -> PyResult<()> {
     conn.execute("BEGIN", ()).await.map_err(to_py_err)?;
     Ok(())
 }
+fn determine_autocommit(autocommit: i32, isolation_level: &Option<String>) -> bool {
+    match autocommit { LEGACY_TRANSACTION_CONTROL => isolation_level.is_none(), _ => autocommit != 0 }
+}
+fn stmt_is_dml(sql: &str) -> bool {
+    let s = sql.trim().to_uppercase();
+    s.starts_with("INSERT") || s.starts_with("UPDATE") || s.starts_with("DELETE") || s.starts_with("REPLACE")
+}
+async fn execute_async(conn_arc: Arc<Mutex<Option<libsql_core::Connection>>>, stmt_arc: Arc<Mutex<Option<libsql_core::Statement>>>, rows_arc: Arc<Mutex<Option<libsql_core::Rows>>>, autocommit: i32, isolation_level: Option<String>, sql: String, params: libsql_core::params::Params) -> PyResult<(i64, i64)> {
+    let mut guard = conn_arc.lock().await;
+    let conn = guard.as_mut().ok_or_else(|| PyValueError::new_err("Connection closed"))?;
+    if !determine_autocommit(autocommit, &isolation_level) && stmt_is_dml(&sql) && conn.is_autocommit() { begin_transaction(conn).await?; }
+    let stmt = conn.prepare(&sql).await.map_err(to_py_err)?;
+    let col_count = stmt.column_count();
+    let mut s_guard = stmt_arc.lock().await;
+    *s_guard = Some(stmt);
+    let s_ref = s_guard.as_ref().unwrap();
+    let mut r_guard = rows_arc.lock().await;
+    if col_count > 0 { *r_guard = Some(s_ref.query(params).await.map_err(to_py_err)?); } else { s_ref.execute(params).await.map_err(to_py_err)?; *r_guard = None; }
+    Ok((conn.changes() as i64, conn.last_insert_rowid()))
+}
 
-fn extract_parameters(
-    parameters: Option<ListOrTuple<'_>>
-) -> PyResult<libsql_core::params::Params> {
+fn extract_parameters(py: Python, parameters: Option<ListOrTuple>) -> PyResult<libsql_core::params::Params> {
     match parameters {
-        Some(parameters) => {
+        Some(p) => {
             let mut params = vec![];
-            for param in parameters.iter() {
-                let param = if param.is_none() {
-                    libsql_core::Value::Null
-                } else if let Ok(value) = param.extract::<i32>() {
-                    libsql_core::Value::Integer(value as i64)
-                } else if let Ok(value) = param.extract::<f64>() {
-                    libsql_core::Value::Real(value)
-                } else if let Ok(value) = param.extract::<&str>() {
-                    libsql_core::Value::Text(value.to_string())
-                } else if let Ok(value) = param.extract::<&[u8]>() {
-                    libsql_core::Value::Blob(value.to_vec())
-                } else {
-                    return Err(PyValueError::new_err(format!(
-                        "Unsupported parameter type {}",
-                        param.to_string()
-                    )));
-                };
-                params.push(param);
+            let (len, binder) = match &p { ListOrTuple::List(l) => (l.bind(py).len(), l.bind(py).as_any()), ListOrTuple::Tuple(t) => (t.bind(py).len(), t.bind(py).as_any()) };
+            for i in 0..len {
+                let item = if let Ok(l) = binder.downcast::<PyList>() { l.get_item(i)? } else { binder.downcast::<PyTuple>().unwrap().get_item(i)? };
+                let val = if item.is_none() { libsql_core::Value::Null }
+                else if let Ok(v) = item.extract::<i64>() { libsql_core::Value::Integer(v) }
+                else if let Ok(s) = item.extract::<String>() { libsql_core::Value::Text(s) }
+                else if let Ok(v) = item.extract::<f64>() { libsql_core::Value::Real(v) }
+                else if let Ok(v) = item.extract::<Vec<u8>>() { libsql_core::Value::Blob(v) }
+                else { libsql_core::Value::Null };
+                params.push(val);
             }
             Ok(libsql_core::params::Params::Positional(params))
         }
@@ -592,129 +431,20 @@ fn extract_parameters(
     }
 }
 
-async fn execute_async(
-    conn_arc: Arc<Mutex<Option<libsql_core::Connection>>>,
-    stmt_arc: Arc<Mutex<Option<libsql_core::Statement>>>,
-    rows_arc: Arc<Mutex<Option<libsql_core::Rows>>>,
-    rowcount_arc: Arc<Mutex<i64>>,
-    autocommit: i32,
-    isolation_level: Option<String>,
-    sql: String,
-    params: libsql_core::params::Params,
-) -> PyResult<()> {
-    let mut conn_guard = conn_arc.lock().await;
-    let conn = conn_guard.as_mut().ok_or_else(|| PyValueError::new_err("Connection already closed"))?;
-
-    let stmt_is_dml = stmt_is_dml(&sql);
-    let auto_c = determine_autocommit(autocommit, &isolation_level);
-    if !auto_c && stmt_is_dml && conn.is_autocommit() {
-        begin_transaction(conn).await?;
-    }
-
-    let mut stmt = conn.prepare(&sql).await.map_err(to_py_err)?;
-
-    let mut rows_guard = rows_arc.lock().await;
-    if stmt.columns().iter().len() > 0 {
-        let rows = stmt.query(params).await.map_err(to_py_err)?;
-        *rows_guard = Some(rows);
-    } else {
-        stmt.execute(params).await.map_err(to_py_err)?;
-        *rows_guard = None;
-    }
-
-    let mut rowcount_guard = rowcount_arc.lock().await;
-    *rowcount_guard += conn.changes() as i64;
-
-    let mut stmt_guard = stmt_arc.lock().await;
-    *stmt_guard = Some(stmt);
-
-    Ok(())
-}
-
-fn determine_autocommit(autocommit: i32, isolation_level: &Option<String>) -> bool {
-    if autocommit == LEGACY_TRANSACTION_CONTROL {
-        isolation_level.is_none()
-    } else {
-        autocommit != 0
+fn convert_value(py: Python<'_>, value: libsql_core::Value) -> PyResult<PyObject> {
+    match value {
+        libsql_core::Value::Null => Ok(py.None()),
+        libsql_core::Value::Integer(v) => Ok(v.into_pyobject(py)?.unbind().into_any()),
+        libsql_core::Value::Real(v) => Ok(v.into_pyobject(py)?.unbind().into_any()),
+        libsql_core::Value::Text(v) => Ok(v.into_pyobject(py)?.unbind().into_any()),
+        libsql_core::Value::Blob(v) => Ok(v.as_slice().into_pyobject(py)?.unbind().into_any()),
     }
 }
 
-fn stmt_is_dml(sql: &str) -> bool {
-    let sql = sql.trim();
-    let sql = sql.to_uppercase();
-    sql.starts_with("INSERT") || sql.starts_with("UPDATE") || sql.starts_with("DELETE")
-}
-
-fn convert_row(
-    py: Python,
-    row: libsql_core::Row,
-    column_count: i32,
-) -> PyResult<Bound<'_, PyTuple>> {
-    let mut elements: Vec<Py<PyAny>> = vec![];
-    for col_idx in 0..column_count {
-        let libsql_value = row.get_value(col_idx).map_err(to_py_err)?;
-        let value = match libsql_value {
-            libsql_core::Value::Integer(v) => {
-                let value = v as i64;
-                value.into_pyobject(py).unwrap().into()
-            }
-            libsql_core::Value::Real(v) => v.into_pyobject(py).unwrap().into(),
-            libsql_core::Value::Text(v) => v.into_pyobject(py).unwrap().into(),
-            libsql_core::Value::Blob(v) => {
-                let value = v.as_slice();
-                value.into_pyobject(py).unwrap().into()
-            }
-            libsql_core::Value::Null => py.None(),
-        };
-        elements.push(value);
-    }
-    Ok(PyTuple::new(py, elements)?)
-}
-
-create_exception!(libsql, Error, pyo3::exceptions::PyException);
-
-impl<'py> FromPyObject<'py> for ListOrTuple<'py> {
-    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
-        if let Ok(list) = ob.downcast::<PyList>() {
-            Ok(ListOrTuple::List(list.clone()))
-        } else if let Ok(tuple) = ob.downcast::<PyTuple>() {
-            Ok(ListOrTuple::Tuple(tuple.clone()))
-        } else {
-            Err(PyValueError::new_err(
-                "Expected a list or tuple for parameters",
-            ))
-        }
-    }
-}
-
-impl<'py> ListOrTuple<'py> {
-    pub fn iter(&self) -> ListOrTupleIterator<'py> {
-        ListOrTupleIterator {
-            index: 0,
-            inner: self.clone(),
-        }
-    }
-}
-
-impl<'py> Iterator for ListOrTupleIterator<'py> {
-    type Item = Bound<'py, PyAny>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let rv = match &self.inner {
-            ListOrTuple::List(list) => list.get_item(self.index),
-            ListOrTuple::Tuple(tuple) => tuple.get_item(self.index),
-        };
-
-        rv.ok().map(|item| {
-            self.index += 1;
-            item
-        })
-    }
-}
-
+create_exception!(aiolibsql, Error, pyo3::exceptions::PyException);
 #[pymodule]
 fn aiolibsql(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let _ = tracing_subscriber::fmt::try_init();
+    m.add("VERSION", VERSION)?;
     m.add("LEGACY_TRANSACTION_CONTROL", LEGACY_TRANSACTION_CONTROL)?;
     m.add("paramstyle", "qmark")?;
     m.add("sqlite_version_info", (3, 42, 0))?;

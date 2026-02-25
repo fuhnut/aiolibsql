@@ -1,19 +1,15 @@
-# Local
+# Vector Search
 
-This example demonstrates how to use libSQL vector search with a local database.
+This example demonstrates vector similarity search using libSQL's built-in vector extensions.
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install libsql
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
 ```
 
 ## Running
 
-Execute the example:
-
 ```bash
 python3 main.py
 ```
-
-This will setup a local SQLite database, insert some data, and then query the results using the vector similarity search function.

@@ -1,19 +1,22 @@
-# Local
+# Embedded Replica (Sync)
 
-This example demonstrates how to use libSQL with a synced database (local file synced with a remote database).
+This example demonstrates how to create an embedded replica that syncs with a remote Turso database.
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install libsql
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
+```
+
+## Configuration
+
+```bash
+export TURSO_DATABASE_URL="libsql://your-db.turso.io"
+export TURSO_AUTH_TOKEN="your-token"
 ```
 
 ## Running
 
-Execute the example:
-
 ```bash
-TURSO_DATABASE_URL="..." TURSO_AUTH_TOKEN="..." python3 main.py
+python3 main.py
 ```
-
-This will create a local database file that syncs with a remote database, insert some data, and query it.

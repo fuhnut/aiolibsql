@@ -1,19 +1,15 @@
 # Local
 
-This example demonstrates how to use libSQL with a local SQLite file.
+This example demonstrates how to use aiolibsql with a local SQLite file.
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install libsql
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
 ```
 
 ## Running
 
-Execute the example:
-
 ```bash
 python3 main.py
 ```
-
-This will connect to a local SQLite, insert some data, and query it.

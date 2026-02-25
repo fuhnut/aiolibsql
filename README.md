@@ -1,47 +1,176 @@
-<p align="center">
-  <a href="https://docs.turso.tech/sdk/python/quickstart">
-    <img alt="Turso + Python" src="https://github.com/tursodatabase/libsql-python/assets/950181/3748f2b3-872e-4cdd-bbe3-78491fd81dfa" width="1000">
-    <h3 align="center">Turso + Python</h3>
-  </a>
-</p>
+# aiolibsql
 
-<p align="center">
-  SQLite for Production. Powered by <a href="https://turso.tech/libsql">libSQL</a>.
-</p>
+A high-performance, fully asynchronous Python wrapper for [libSQL](https://github.com/tursodatabase/libsql), built with Rust and PyO3.
 
-<p align="center">
-  <a href="https://turso.tech"><strong>Turso</strong></a> ·
-  <a href="https://docs.turso.tech/quickstart"><strong>Quickstart</strong></a> ·
-  <a href="/examples"><strong>Examples</strong></a> ·
-  <a href="https://docs.turso.tech"><strong>Docs</strong></a> ·
-  <a href="https://discord.gg/turso"><strong>Discord</strong></a> ·
-  <a href="https://blog.turso.tech/"><strong>Blog &amp; Tutorials</strong></a>
-</p>
+This is an async fork of the official `libsql-python` SDK, designed to fix database locking issues in `asyncio` applications like Discord bots.
 
-<p align="center">
-  <a href="https://pypi.org/project/libsql">
-    <img src="https://badge.fury.io/py/libsql.svg" alt="PyPI" title="PyPI" />
-  </a>
-  <a href="https://discord.com/invite/4B5D7hYwub">
-    <img src="https://dcbadge.vercel.app/api/server/4B5D7hYwub?style=flat" alt="discord activity" title="join us on discord" />
-  </a>
-</p>
+## Features
 
----
+- **True Async/Await** — All database operations are non-blocking coroutines
+- **Async Context Manager** — `async with await aiolibsql.connect(...) as conn:`
+- **Thread-Safe** — Uses `Arc<Mutex>` for concurrent access
+- **Multiple Backends** — Local files, remote Turso, embedded replicas, encrypted databases
+- **Full Type Support** — `TEXT`, `INTEGER`, `REAL`, `BLOB`, `NULL`
+- **DB-API 2.0 Style** — Familiar `execute`, `fetchone`, `fetchall`, `cursor` interface
+- **SQLAlchemy Compatible** — Use with `create_engine("sqlite+aiolibsql://")`
 
-## Documentation
+## Installation
 
-1. [Turso Quickstart](https://docs.turso.tech/quickstart) &mdash; Learn how create and connect your first database.
-2. [SDK Quickstart](https://docs.turso.tech/sdk/python/quickstart) &mdash; Learn how to install and execute queries using the libSQL client.
-3. [SDK Reference](https://docs.turso.tech/sdk/python/reference) &mdash; Dive deeper with the libSQL SDK reference and examples.
+### From GitHub (recommended)
 
-### What is Turso?
+```bash
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
+```
 
-[Turso](https://turso.tech) is a SQLite-compatible database built on [libSQL](https://docs.turso.tech/libsql), the Open Contribution fork of SQLite. It enables scaling to hundreds of thousands of databases per organization and supports replication to any location, including your own servers, for microsecond-latency access.
+### Build Requirements
 
-Learn more about what you can do with Turso:
+Since this package compiles native Rust code, you need the following installed:
 
-- [Embedded Replicas](https://docs.turso.tech/features/embedded-replicas)
-- [Platform API](https://docs.turso.tech/features/platform-api)
-- [Branching](https://docs.turso.tech/features/branching)
-- [Point-in-Time Recovery](https://docs.turso.tech/features/point-in-time-recovery)
+| Dependency | Install Command (Debian/Ubuntu) |
+|---|---|
+| **Rust & Cargo** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **CMake** | `apt install cmake` |
+| **C/C++ Compiler** | `apt install build-essential` |
+| **Python Dev Headers** | `apt install python3-dev` |
+
+> [!NOTE]
+> On macOS, install Xcode Command Line Tools (`xcode-select --install`) and CMake (`brew install cmake`).
+
+## Quick Start
+
+```python
+import asyncio
+import aiolibsql
+
+async def main():
+    async with await aiolibsql.connect("hello.db") as conn:
+        await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)")
+        await conn.execute("INSERT INTO users (name) VALUES (?)", ("Alice",))
+
+        cursor = await conn.execute("SELECT * FROM users")
+        rows = await cursor.fetchall()
+        print(rows)
+
+asyncio.run(main())
+```
+
+## Connection Modes
+
+```python
+# Local file
+conn = await aiolibsql.connect("data.db")
+
+# In-memory
+conn = await aiolibsql.connect(":memory:")
+
+# Remote Turso
+conn = await aiolibsql.connect("libsql://your-db.turso.io", auth_token="...")
+
+# Embedded replica (local + remote sync)
+conn = await aiolibsql.connect("local.db", sync_url="libsql://your-db.turso.io", auth_token="...")
+
+# Encrypted local
+conn = await aiolibsql.connect("secret.db", encryption_key="my-key")
+```
+
+## API Reference
+
+### `connect()` Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `database` | `str` | *required* | Path, `:memory:`, or `libsql://` URL |
+| `timeout` | `float` | `5.0` | Busy timeout in seconds |
+| `isolation_level` | `str \| None` | `"DEFERRED"` | Transaction isolation mode |
+| `sync_url` | `str \| None` | `None` | Remote URL for embedded replica |
+| `sync_interval` | `float \| None` | `None` | Auto-sync interval (seconds) |
+| `offline` | `bool` | `False` | Read-only replica mode |
+| `auth_token` | `str \| None` | `None` | Auth token for Turso |
+| `encryption_key` | `str \| None` | `None` | AES encryption key |
+| `autocommit` | `int` | `-1` | `1` (on), `0` (off), `-1` (legacy) |
+
+### Module Constants
+
+| Constant | Value |
+|---|---|
+| `aiolibsql.VERSION` | `"0.1.14-stable"` |
+| `aiolibsql.paramstyle` | `"qmark"` |
+| `aiolibsql.sqlite_version_info` | `(3, 42, 0)` |
+| `aiolibsql.LEGACY_TRANSACTION_CONTROL` | `-1` |
+| `aiolibsql.Error` | Base exception class |
+
+### Connection
+
+| Method / Property | Description |
+|---|---|
+| `await conn.execute(sql, params?)` | Execute a SQL statement, returns `Cursor` |
+| `await conn.executemany(sql, params_list)` | Execute for each param set |
+| `await conn.executescript(script)` | Execute multiple statements at once |
+| `await conn.commit()` | Commit the current transaction |
+| `await conn.rollback()` | Rollback the current transaction |
+| `await conn.sync()` | Sync with remote (replicas only) |
+| `await conn.close()` | Close the connection |
+| `conn.cursor()` | Create a new `Cursor` *(sync)* |
+| `conn.isolation_level` | Current isolation level (read-only) |
+| `conn.in_transaction` | `True` if inside a transaction |
+| `conn.autocommit` | Get/set autocommit mode |
+
+### Cursor
+
+| Method / Property | Description |
+|---|---|
+| `await cursor.execute(sql, params?)` | Execute a statement |
+| `await cursor.executemany(sql, params_list)` | Execute for each param set |
+| `await cursor.executescript(script)` | Execute multiple statements |
+| `await cursor.fetchone()` | Fetch the next row (or `None`) |
+| `await cursor.fetchmany(size?)` | Fetch `size` rows (default: `arraysize`) |
+| `await cursor.fetchall()` | Fetch all remaining rows |
+| `await cursor.close()` | Close the cursor |
+| `cursor.description` | Column metadata (after SELECT) |
+| `cursor.lastrowid` | Row ID of last INSERT |
+| `cursor.rowcount` | Number of rows affected |
+| `cursor.arraysize` | Default fetch size (get/set) |
+
+### Supported Parameter Types
+
+| Python | SQLite |
+|---|---|
+| `None` | `NULL` |
+| `str` | `TEXT` |
+| `int` | `INTEGER` |
+| `float` | `REAL` |
+| `bytes` | `BLOB` |
+
+## SQLAlchemy Integration
+
+aiolibsql includes a SQLAlchemy dialect. Use `sqlite+aiolibsql://` as the connection URL:
+
+```python
+import aiolibsql_sqlalchemy  # registers the dialect
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
+
+engine = create_engine("sqlite+aiolibsql://", echo=True)  # in-memory
+# engine = create_engine("sqlite+aiolibsql:///data.db")    # local file
+
+with Session(engine) as session:
+    session.execute(text("CREATE TABLE t (x INTEGER)"))
+    session.execute(text("INSERT INTO t VALUES (:x)"), {"x": 42})
+    session.commit()
+    result = session.execute(text("SELECT * FROM t"))
+    print(result.fetchall())
+```
+
+See [`examples/sqlalchemy/`](examples/sqlalchemy/) for a full ORM example.
+
+## Differences from `libsql`
+
+1. **Import**: `import aiolibsql` instead of `import libsql`
+2. **Await everything**: Every database call is a coroutine
+3. **Connection**: `aiolibsql.connect()` returns a coroutine — use `await`
+4. **Context manager**: Use `async with` instead of `with`
+
+## License
+
+MIT

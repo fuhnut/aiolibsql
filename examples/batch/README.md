@@ -1,19 +1,15 @@
-# Local
+# Batch (executescript)
 
-This example demonstrates how to use libSQL to execute a batch of SQL statements.
+This example demonstrates how to execute multiple SQL statements in a single batch.
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install libsql
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
 ```
 
 ## Running
 
-Execute the example:
-
 ```bash
 python3 main.py
 ```
-
-This will create a local database, execute a batch of SQL statements (creating tables, inserting data, etc.), and then query the results.

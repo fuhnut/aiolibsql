@@ -1,19 +1,24 @@
-# Local
+# Remote
 
-This example demonstrates how to use libSQL with a remote database.
+This example demonstrates how to connect to a remote Turso / libSQL database.
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install libsql
+pip install "aiolibsql @ git+https://github.com/fuhnut/aiolibsql"
+```
+
+## Configuration
+
+Set the following environment variables:
+
+```bash
+export TURSO_DATABASE_URL="libsql://your-db.turso.io"
+export TURSO_AUTH_TOKEN="your-token"
 ```
 
 ## Running
 
-Execute the example:
-
 ```bash
-TURSO_DATABASE_URL="..." TURSO_AUTH_TOKEN="..." python3 main.py
+python3 main.py
 ```
-
-This will connect to a remote database, insert some data, and query it.

@@ -1,19 +1,23 @@
-import libsql
+import aiolibsql
 import os
+import asyncio
 
-url = os.getenv("TURSO_DATABASE_URL")
-auth_token = os.getenv("TURSO_AUTH_TOKEN")
+async def main():
+    url = os.getenv("TURSO_DATABASE_URL")
+    auth_token = os.getenv("TURSO_AUTH_TOKEN")
 
-conn = libsql.connect("local.db", sync_url=url, auth_token=auth_token)
-conn.sync()
+    async with await aiolibsql.connect("local.db", sync_url=url, auth_token=auth_token) as conn:
+        await conn.sync()
 
-cur = conn.cursor()
-
-conn.execute("DROP TABLE IF EXISTS users;")
-conn.execute("CREATE TABLE IF NOT EXISTS users (name TEXT);")
-conn.execute("INSERT INTO users VALUES ('first@example.com');")
-conn.execute("INSERT INTO users VALUES ('second@example.com');")
-conn.execute("INSERT INTO users VALUES ('third@example.com');")
+        await conn.execute("DROP TABLE IF EXISTS users;")
+        await conn.execute("CREATE TABLE IF NOT EXISTS users (name TEXT);")
+        await conn.execute("INSERT INTO users VALUES ('first@example.com');")
+        await conn.execute("INSERT INTO users VALUES ('second@example.com');")
+        await conn.execute("INSERT INTO users VALUES ('third@example.com');")
 
 
-print(conn.execute("select * from users").fetchall())
+        cursor = await conn.execute("select * from users")
+        print(await cursor.fetchall())
+
+if __name__ == "__main__":
+    asyncio.run(main())
