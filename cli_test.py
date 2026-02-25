@@ -332,8 +332,15 @@ async def main():
 
     print("\n── ConnectionPool API ──")
 
+    import tempfile, os
+    pool_db = os.path.join(tempfile.gettempdir(), "aiolibsql_test_pool.db")
+    # Clean up any leftover test DB
+    for suffix in ("", "-wal", "-shm"):
+        try: os.remove(pool_db + suffix)
+        except FileNotFoundError: pass
+
     try:
-        pool = await aiolibsql.create_pool(":memory:", size=5)
+        pool = await aiolibsql.create_pool(pool_db, size=5)
         report("create_pool()", True, "pool initialized with size=5")
     except Exception as e:
         report("create_pool()", False, str(e))
@@ -389,6 +396,11 @@ async def main():
             report("pool.close()", True)
         except Exception as e:
             report("pool.close()", False, str(e))
+
+    # Clean up temp pool DB
+    for suffix in ("", "-wal", "-shm"):
+        try: os.remove(pool_db + suffix)
+        except FileNotFoundError: pass
 
     print("\n── Module Constants ──")
 
