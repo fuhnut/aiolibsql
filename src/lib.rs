@@ -4,14 +4,14 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use tokio::sync::{Mutex, Semaphore};
 use std::time::Duration;
 use pyo3_async_runtimes::tokio::future_into_py;
 
 
 const LEGACY_TRANSACTION_CONTROL: i32 = -1;
-const VERSION: &str = "0.1.14-stable";
+const VERSION: &str = "0.2.0";
 
 enum ListOrTuple {
     List(Py<PyList>),
@@ -441,6 +441,353 @@ fn convert_value(py: Python<'_>, value: libsql_core::Value) -> PyResult<PyObject
     }
 }
 
+fn stmt_is_read(sql: &str) -> bool {
+    let s = sql.trim().to_uppercase();
+    s.starts_with("SELECT") || s.starts_with("PRAGMA") || s.starts_with("EXPLAIN")
+}
+
+#[pyclass]
+pub struct ConnectionPool {
+    #[allow(dead_code)]
+    db: Arc<libsql_core::Database>,
+    writer: Arc<Mutex<libsql_core::Connection>>,
+    readers: Vec<Arc<Mutex<libsql_core::Connection>>>,
+    reader_idx: Arc<AtomicUsize>,
+    reader_sem: Arc<Semaphore>,
+    writer_sem: Arc<Semaphore>,
+    pool_size: usize,
+}
+
+#[pymethods]
+impl ConnectionPool {
+    #[getter]
+    fn size(&self) -> usize { self.pool_size }
+
+    #[getter]
+    fn reader_count(&self) -> usize { self.readers.len() }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    fn execute<'py>(&self, py: Python<'py>, sql: String, parameters: Option<ListOrTuple>) -> PyResult<Bound<'py, PyAny>> {
+        let params = extract_parameters(py, parameters)?;
+        let is_read = stmt_is_read(&sql);
+
+        if is_read {
+            let idx = self.reader_idx.fetch_add(1, Ordering::Relaxed) % self.readers.len();
+            let reader = self.readers[idx].clone();
+            let sem = self.reader_sem.clone();
+            future_into_py(py, async move {
+                let _permit = sem.acquire().await.map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let guard = reader.lock().await;
+                let stmt = guard.prepare(&sql).await.map_err(to_py_err)?;
+                let col_count = stmt.column_count();
+                let mut desc_cols: Vec<String> = vec![];
+                for c in stmt.columns() { desc_cols.push(c.name().to_string()); }
+                let rows_data = if col_count > 0 {
+                    let rows = stmt.query(params).await.map_err(to_py_err)?;
+                    let cc = rows.column_count();
+                    let mut data = vec![];
+                    let mut rows = rows;
+                    while let Some(r) = rows.next().await.map_err(to_py_err)? {
+                        let mut row = Vec::with_capacity(cc as usize);
+                        for i in 0..cc { row.push(r.get_value(i).map_err(to_py_err)?); }
+                        data.push(row);
+                    }
+                    data
+                } else {
+                    stmt.execute(params).await.map_err(to_py_err)?;
+                    vec![]
+                };
+                let changes = guard.changes() as i64;
+                let last_id = guard.last_insert_rowid();
+                drop(guard);
+                Python::with_gil(|py| {
+                    let mut py_rows = vec![];
+                    for row in rows_data {
+                        let mut py_row = vec![];
+                        for v in row { py_row.push(convert_value(py, v)?); }
+                        py_rows.push(PyTuple::new(py, py_row)?.unbind().into_any());
+                    }
+                    let desc = if !desc_cols.is_empty() {
+                        let mut elements: Vec<PyObject> = vec![];
+                        for name in &desc_cols {
+                            let e = (name.as_str(), py.None(), py.None(), py.None(), py.None(), py.None(), py.None()).into_pyobject(py)?.into_any().unbind();
+                            elements.push(e);
+                        }
+                        Some(PyTuple::new(py, elements)?.unbind().into())
+                    } else { None };
+                    Ok(PoolCursor {
+                        rows: Arc::new(Mutex::new(py_rows.into_iter().map(|r| Some(r)).collect())),
+                        description: desc,
+                        rowcount: changes,
+                        lastrowid: last_id,
+                        pos: Arc::new(AtomicUsize::new(0)),
+                    })
+                })
+            })
+        } else {
+            let writer = self.writer.clone();
+            let sem = self.writer_sem.clone();
+            future_into_py(py, async move {
+                let _permit = sem.acquire().await.map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let guard = writer.lock().await;
+                let stmt = guard.prepare(&sql).await.map_err(to_py_err)?;
+                let col_count = stmt.column_count();
+                let mut desc_cols: Vec<String> = vec![];
+                for c in stmt.columns() { desc_cols.push(c.name().to_string()); }
+                let rows_data = if col_count > 0 {
+                    let rows = stmt.query(params).await.map_err(to_py_err)?;
+                    let cc = rows.column_count();
+                    let mut data = vec![];
+                    let mut rows = rows;
+                    while let Some(r) = rows.next().await.map_err(to_py_err)? {
+                        let mut row = Vec::with_capacity(cc as usize);
+                        for i in 0..cc { row.push(r.get_value(i).map_err(to_py_err)?); }
+                        data.push(row);
+                    }
+                    data
+                } else {
+                    stmt.execute(params).await.map_err(to_py_err)?;
+                    vec![]
+                };
+                let changes = guard.changes() as i64;
+                let last_id = guard.last_insert_rowid();
+                drop(guard);
+                Python::with_gil(|py| {
+                    let mut py_rows = vec![];
+                    for row in rows_data {
+                        let mut py_row = vec![];
+                        for v in row { py_row.push(convert_value(py, v)?); }
+                        py_rows.push(PyTuple::new(py, py_row)?.unbind().into_any());
+                    }
+                    let desc: Option<PyObject> = if !desc_cols.is_empty() {
+                        let mut elements: Vec<PyObject> = vec![];
+                        for name in &desc_cols {
+                            let e = (name.as_str(), py.None(), py.None(), py.None(), py.None(), py.None(), py.None()).into_pyobject(py)?.into_any().unbind();
+                            elements.push(e);
+                        }
+                        Some(PyTuple::new(py, elements)?.unbind().into())
+                    } else { None };
+                    Ok(PoolCursor {
+                        rows: Arc::new(Mutex::new(py_rows.into_iter().map(|r| Some(r)).collect())),
+                        description: desc,
+                        rowcount: changes,
+                        lastrowid: last_id,
+                        pos: Arc::new(AtomicUsize::new(0)),
+                    })
+                })
+            })
+        }
+    }
+
+    #[pyo3(signature = (sql, parameters=None))]
+    fn executemany<'py>(&self, py: Python<'py>, sql: String, parameters: Option<Bound<'py, PyList>>) -> PyResult<Bound<'py, PyAny>> {
+        let mut p_list = vec![];
+        if let Some(ps) = parameters {
+            for p in ps.iter() { p_list.push(extract_parameters(py, Some(p.extract::<ListOrTuple>()?))?); }
+        }
+        let writer = self.writer.clone();
+        let sem = self.writer_sem.clone();
+        future_into_py(py, async move {
+            let _permit = sem.acquire().await.map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let guard = writer.lock().await;
+            guard.execute("BEGIN", ()).await.map_err(to_py_err)?;
+            let mut total_changes: i64 = 0;
+            let mut last_id: i64 = 0;
+            for p in p_list {
+                let stmt = guard.prepare(&sql).await.map_err(to_py_err)?;
+                stmt.execute(p).await.map_err(to_py_err)?;
+                total_changes += guard.changes() as i64;
+                last_id = guard.last_insert_rowid();
+            }
+            guard.execute("COMMIT", ()).await.map_err(to_py_err)?;
+            drop(guard);
+            Python::with_gil(|_py| {
+                Ok(PoolCursor {
+                    rows: Arc::new(Mutex::new(vec![])),
+                    description: None,
+                    rowcount: total_changes,
+                    lastrowid: last_id,
+                    pos: Arc::new(AtomicUsize::new(0)),
+                })
+            })
+        })
+    }
+
+    fn executebatch<'py>(&self, py: Python<'py>, operations: Bound<'py, PyList>) -> PyResult<Bound<'py, PyAny>> {
+        let mut ops: Vec<(String, libsql_core::params::Params)> = vec![];
+        for item in operations.iter() {
+            let tuple = item.downcast::<PyTuple>()?;
+            let sql: String = tuple.get_item(0)?.extract()?;
+            let params_obj = tuple.get_item(1)?;
+            let params = if params_obj.is_none() {
+                libsql_core::params::Params::None
+            } else {
+                extract_parameters(py, Some(params_obj.extract::<ListOrTuple>()?))?                
+            };
+            ops.push((sql, params));
+        }
+        let writer = self.writer.clone();
+        let sem = self.writer_sem.clone();
+        future_into_py(py, async move {
+            let _permit = sem.acquire().await.map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let guard = writer.lock().await;
+            guard.execute("BEGIN", ()).await.map_err(to_py_err)?;
+            let mut total_changes: i64 = 0;
+            let mut last_id: i64 = 0;
+            for (sql, params) in ops {
+                let stmt = guard.prepare(&sql).await.map_err(to_py_err)?;
+                stmt.execute(params).await.map_err(to_py_err)?;
+                total_changes += guard.changes() as i64;
+                last_id = guard.last_insert_rowid();
+            }
+            guard.execute("COMMIT", ()).await.map_err(to_py_err)?;
+            drop(guard);
+            Python::with_gil(|_py| {
+                Ok(PoolCursor {
+                    rows: Arc::new(Mutex::new(vec![])),
+                    description: None,
+                    rowcount: total_changes,
+                    lastrowid: last_id,
+                    pos: Arc::new(AtomicUsize::new(0)),
+                })
+            })
+        })
+    }
+
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let writer = self.writer.clone();
+        let readers: Vec<Arc<Mutex<libsql_core::Connection>>> = self.readers.iter().cloned().collect();
+        future_into_py(py, async move {
+            // Close writer
+            drop(writer.lock().await);
+            // Close readers
+            for r in readers {
+                drop(r.lock().await);
+            }
+            Ok(())
+        })
+    }
+
+    fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move { Ok(slf) })
+    }
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __aexit__<'py>(&self, py: Python<'py>, _exc_type: Option<PyObject>, _exc_val: Option<PyObject>, _exc_tb: Option<PyObject>) -> PyResult<Bound<'py, PyAny>> {
+        let writer = self.writer.clone();
+        let readers: Vec<Arc<Mutex<libsql_core::Connection>>> = self.readers.iter().cloned().collect();
+        future_into_py(py, async move {
+            drop(writer.lock().await);
+            for r in readers { drop(r.lock().await); }
+            Ok(false)
+        })
+    }
+}
+
+#[pyclass]
+pub struct PoolCursor {
+    rows: Arc<Mutex<Vec<Option<PyObject>>>>,
+    description: Option<PyObject>,
+    rowcount: i64,
+    lastrowid: i64,
+    pos: Arc<AtomicUsize>,
+}
+
+#[pymethods]
+impl PoolCursor {
+    fn fetchone<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let pos = self.pos.fetch_add(1, Ordering::SeqCst);
+        let guard = self.rows.blocking_lock();
+        if pos < guard.len() {
+            if let Some(row) = &guard[pos] {
+                return Ok(row.clone_ref(py));
+            }
+        }
+        Ok(py.None())
+    }
+
+    fn fetchall<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let pos = self.pos.load(Ordering::SeqCst);
+        let guard = self.rows.blocking_lock();
+        let mut result = vec![];
+        for i in pos..guard.len() {
+            if let Some(row) = &guard[i] {
+                result.push(row.clone_ref(py));
+            }
+        }
+        self.pos.store(guard.len(), Ordering::SeqCst);
+        Ok(PyList::new(py, result)?.unbind().into_any())
+    }
+
+    #[getter]
+    fn description<'py>(&self, py: Python<'py>) -> Option<PyObject> {
+        self.description.as_ref().map(|obj| obj.clone_ref(py))
+    }
+    #[getter]
+    fn lastrowid(&self) -> i64 { self.lastrowid }
+    #[getter]
+    fn rowcount(&self) -> i64 { self.rowcount }
+}
+
+#[pyfunction]
+#[pyo3(signature = (database, size=10, timeout=5.0, encryption_key=None))]
+fn create_pool<'py>(
+    py: Python<'py>,
+    database: String,
+    size: usize,
+    timeout: f64,
+    encryption_key: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if size < 2 {
+        return Err(PyValueError::new_err("Pool size must be at least 2 (1 writer + 1 reader)"));
+    }
+    future_into_py(py, async move {
+        let encryption_config = match encryption_key {
+            Some(key) => {
+                let cipher = libsql_core::Cipher::default();
+                Some(libsql_core::EncryptionConfig::new(cipher, key.into()))
+            }
+            None => None,
+        };
+        let mut builder = libsql_core::Builder::new_local(&database);
+        if let Some(config) = encryption_config.clone() { builder = builder.encryption_config(config); }
+        let db = builder.build().await.map_err(to_py_err)?;
+
+        // Create writer connection and apply PRAGMAs
+        let writer_conn = db.connect().map_err(to_py_err)?;
+        writer_conn.busy_timeout(Duration::from_secs_f64(timeout)).map_err(to_py_err)?;
+        writer_conn.execute("PRAGMA journal_mode=WAL", ()).await.map_err(to_py_err)?;
+        writer_conn.execute("PRAGMA synchronous=NORMAL", ()).await.map_err(to_py_err)?;
+        writer_conn.execute("PRAGMA busy_timeout=5000", ()).await.map_err(to_py_err)?;
+        writer_conn.execute("PRAGMA cache_size=-8000", ()).await.map_err(to_py_err)?;
+        writer_conn.execute("PRAGMA mmap_size=134217728", ()).await.map_err(to_py_err)?;
+        writer_conn.execute("PRAGMA temp_store=MEMORY", ()).await.map_err(to_py_err)?;
+
+        // Create reader connections (size - 1 readers)
+        let reader_count = size - 1;
+        let mut readers = Vec::with_capacity(reader_count);
+        for _ in 0..reader_count {
+            let reader = db.connect().map_err(to_py_err)?;
+            reader.busy_timeout(Duration::from_secs_f64(timeout)).map_err(to_py_err)?;
+            reader.execute("PRAGMA journal_mode=WAL", ()).await.map_err(to_py_err)?;
+            reader.execute("PRAGMA synchronous=NORMAL", ()).await.map_err(to_py_err)?;
+            reader.execute("PRAGMA query_only=ON", ()).await.map_err(to_py_err)?;
+            reader.execute("PRAGMA cache_size=-8000", ()).await.map_err(to_py_err)?;
+            reader.execute("PRAGMA mmap_size=134217728", ()).await.map_err(to_py_err)?;
+            readers.push(Arc::new(Mutex::new(reader)));
+        }
+
+        Ok(ConnectionPool {
+            db: Arc::new(db),
+            writer: Arc::new(Mutex::new(writer_conn)),
+            readers,
+            reader_idx: Arc::new(AtomicUsize::new(0)),
+            reader_sem: Arc::new(Semaphore::new(reader_count * 2)),
+            writer_sem: Arc::new(Semaphore::new(1)),
+            pool_size: size,
+        })
+    })
+}
+
 create_exception!(aiolibsql, Error, pyo3::exceptions::PyException);
 #[pymodule]
 fn aiolibsql(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -450,7 +797,10 @@ fn aiolibsql(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("sqlite_version_info", (3, 42, 0))?;
     m.add("Error", py.get_type::<Error>())?;
     m.add_function(wrap_pyfunction!(connect, m)?)?;
+    m.add_function(wrap_pyfunction!(create_pool, m)?)?;
     m.add_class::<Connection>()?;
     m.add_class::<Cursor>()?;
+    m.add_class::<ConnectionPool>()?;
+    m.add_class::<PoolCursor>()?;
     Ok(())
 }
