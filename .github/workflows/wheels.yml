@@ -1,0 +1,79 @@
+name: Build Wheels
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:  # Manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+          # Linux aarch64 (ARM)
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+          # Windows x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: auto
+          # macOS x86_64 (Intel)
+          - os: macos-13
+            target: x86_64-apple-darwin
+            manylinux: auto
+          # macOS aarch64 (Apple Silicon)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            manylinux: auto
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13
+          manylinux: ${{ matrix.manylinux }}
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist/*.whl
+
+  # Combine all wheels into one download
+  collect:
+    name: Collect all wheels
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: all-wheels
+          path: dist/*.whl
