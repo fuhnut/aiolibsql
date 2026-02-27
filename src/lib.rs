@@ -11,7 +11,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 
 
 const LEGACY_TRANSACTION_CONTROL: i32 = -1;
-const VERSION: &str = "0.2.2";
+const VERSION: &str = "0.2.7";
 
 enum ListOrTuple {
     List(Py<PyList>),
@@ -694,28 +694,59 @@ pub struct PoolCursor {
 
 #[pymethods]
 impl PoolCursor {
-    fn fetchone<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        let pos = self.pos.fetch_add(1, Ordering::SeqCst);
-        let guard = self.rows.blocking_lock();
-        if pos < guard.len() {
-            if let Some(row) = &guard[pos] {
-                return Ok(row.clone_ref(py));
+    fn fetchone<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rows = self.rows.clone();
+        let pos = self.pos.clone();
+        future_into_py(py, async move {
+            let p = pos.fetch_add(1, Ordering::SeqCst);
+            let guard = rows.lock().await;
+            if p < guard.len() {
+                if let Some(row) = &guard[p] {
+                    return Python::with_gil(|py| Ok(row.clone_ref(py)));
+                }
             }
-        }
-        Ok(py.None())
+            Ok(Python::with_gil(|py| py.None()))
+        })
     }
 
-    fn fetchall<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        let pos = self.pos.load(Ordering::SeqCst);
-        let guard = self.rows.blocking_lock();
-        let mut result = vec![];
-        for i in pos..guard.len() {
-            if let Some(row) = &guard[i] {
-                result.push(row.clone_ref(py));
+    fn fetchall<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rows = self.rows.clone();
+        let pos = self.pos.clone();
+        future_into_py(py, async move {
+            let p = pos.load(Ordering::SeqCst);
+            let guard = rows.lock().await;
+            let mut result = vec![];
+            for i in p..guard.len() {
+                if let Some(row) = &guard[i] {
+                    Python::with_gil(|py| result.push(row.clone_ref(py)));
+                }
             }
-        }
-        self.pos.store(guard.len(), Ordering::SeqCst);
-        Ok(PyList::new(py, result)?.unbind().into_any())
+            pos.store(guard.len(), Ordering::SeqCst);
+            Python::with_gil(|py| {
+                Ok(PyList::new(py, result)?.unbind().into_any())
+            })
+        })
+    }
+    #[pyo3(signature = (size=None))]
+    fn fetchmany<'py>(&self, py: Python<'py>, size: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+        let rows = self.rows.clone();
+        let pos = self.pos.clone();
+        let size = size.unwrap_or(1);
+        future_into_py(py, async move {
+            let p = pos.load(Ordering::SeqCst);
+            let guard = rows.lock().await;
+            let mut result = vec![];
+            let end = std::cmp::min(p + size, guard.len());
+            for i in p..end {
+                if let Some(row) = &guard[i] {
+                    Python::with_gil(|py| result.push(row.clone_ref(py)));
+                }
+            }
+            pos.store(end, Ordering::SeqCst);
+            Python::with_gil(|py| {
+                Ok(PyList::new(py, result)?.unbind().into_any())
+            })
+        })
     }
 
     #[getter]
