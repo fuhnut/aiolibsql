@@ -59,7 +59,7 @@ async def main():
 
         # check results.
         cursor = await conn.cursor()
-        await cursor.execute("SELECT id, name FROM users ORDER BY id")
+        await cursor.execute("select id, name from users order by id")
         rows = await cursor.fetchall()
 
         print("\nData in the 'users' table after script execution:")
@@ -79,9 +79,9 @@ async def main_with_error():
     with open(bad_script, "w", encoding="utf-8") as f:
         f.write(
             """
-            CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT);
+            create table items (id integer primary key, value text);
             -- the next line has a typo (INSRT instead of INSERT)
-            INSRT INTO items (value) VALUES ('oops');
+            insrt into items (value) values ('oops');
             """
         )
 
@@ -96,7 +96,7 @@ async def main_with_error():
         # check table absence
         cursor = await conn.cursor()
         await cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='items'"
+            "select name from sqlite_master where type='table' and name='items'"
         )
         exists = await cursor.fetchone()
         print("\nTable 'items' exists after failed script?", bool(exists))

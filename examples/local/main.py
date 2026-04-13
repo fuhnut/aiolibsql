@@ -9,15 +9,15 @@ async def main():
     # async with closes connection on exit.
     async with await aiolibsql.connect("local.db") as conn:
         # create table if it doesn't exist.
-        await conn.execute("CREATE TABLE IF NOT EXISTS users (name TEXT);")
+        await conn.execute("create table if not exists users (name text);")
 
         # insert a few rows.
-        await conn.execute("INSERT INTO users VALUES ('first@example.com');")
-        await conn.execute("INSERT INTO users VALUES ('second@example.com');")
-        await conn.execute("INSERT INTO users VALUES ('third@example.com');")
+        await conn.execute("insert into users values ('first@example.com');")
+        await conn.execute("insert into users values ('second@example.com');")
+        await conn.execute("insert into users values ('third@example.com');")
 
         # select and fetch all rows.
-        cursor = await conn.execute("SELECT * FROM users")
+        cursor = await conn.execute("select * from users")
         rows = await cursor.fetchall()
 
         print("rows in local.db:")

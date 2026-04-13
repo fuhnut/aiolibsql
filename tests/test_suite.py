@@ -361,3 +361,24 @@ async def test_all_param_types(conn):
     assert row[2] == 42
     assert row[3] == pytest.approx(3.14)
     assert row[4] == b"\xde\xad"
+
+
+@pytest.mark.asyncio
+async def test_connection_pool(tmp_path):
+    db = str(tmp_path / "pool.db")
+    pool = await aiolibsql.create_pool(db, size=2)
+    assert pool.size == 2
+    
+    await pool.execute("CREATE TABLE t (id INTEGER)")
+    await pool.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+    
+    await pool.executebatch([
+        ("INSERT INTO t VALUES (?)", (3,)),
+        ("INSERT INTO t VALUES (?)", (4,))
+    ])
+    
+    cursor = await pool.execute("SELECT COUNT(*) FROM t")
+    row = await cursor.fetchone()
+    assert row[0] == 4
+    
+    await pool.close()

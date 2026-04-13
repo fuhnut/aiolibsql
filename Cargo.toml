@@ -13,6 +13,13 @@ pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
 libsql = { version = "0.9.22", features = ["encryption"]  }
 tokio = { version = "1.47.0", features = [ "rt-multi-thread", "sync" ] }
 tracing-subscriber = "0.3.19"
+smallvec = "1.15.1"
+parking_lot = "0.12.5"
+bytes = "1.11.1"
+lru = "0.16.3"
+sqlparser = "0.61.0"
+moka = { version = "0.12.15", features = ["sync"] }
+dashmap = "6.1.0"
 
 [build-dependencies]
 version_check = "0.9.5"

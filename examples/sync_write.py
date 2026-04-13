@@ -30,14 +30,14 @@ async def main():
         auth_token=os.getenv("LIBSQL_AUTH_TOKEN"),
     ) as conn:
         # create and write as normal
-        await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER);")
-        await conn.execute("INSERT INTO users(id) VALUES (1);")
+        await conn.execute("create table if not exists users (id integer);")
+        await conn.execute("insert into users(id) values (1);")
         # local commit persists to the file but does not yet send to remote
         await conn.commit()
         # push local commits to the remote database
         await conn.sync()
 
-        cursor = await conn.execute("SELECT * FROM users")
+        cursor = await conn.execute("select * from users")
         print(await cursor.fetchall())
 
 

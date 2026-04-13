@@ -26,16 +26,16 @@ async def main():
         # the sqlite3 CLI.  Useful for schema initialization.
         await cur.executescript(
             """
-                DROP TABLE IF EXISTS users;
-                CREATE TABLE users (id INTEGER, name TEXT);
-                INSERT INTO users VALUES (1, 'first@example.org');
-                INSERT INTO users VALUES (2, 'second@example.org');
-                INSERT INTO users VALUES (3, 'third@example.org');
+                drop table if exists users;
+                create table users (id integer, name text);
+                insert into users values (1, 'first@example.org');
+                insert into users values (2, 'second@example.org');
+                insert into users values (3, 'third@example.org');
             """
         )
 
         # After the script completes we can run queries like normal.
-        cursor = await conn.execute("SELECT * FROM users")
+        cursor = await conn.execute("select * from users")
         rows = await cursor.fetchall()
         print("Batch rows:", rows)
 

@@ -30,17 +30,17 @@ async def main():
     async with await aiolibsql.connect(url, auth_token=auth_token) as conn:
         # perform several operations; these are sent over the network to the
         # remote database.
-        await conn.execute("DROP TABLE IF EXISTS users;")
-        await conn.execute("CREATE TABLE IF NOT EXISTS users (name TEXT);")
-        await conn.execute("INSERT INTO users VALUES ('first@example.com');")
-        await conn.execute("INSERT INTO users VALUES ('second@example.com');")
-        await conn.execute("INSERT INTO users VALUES ('third@example.com');")
+        await conn.execute("drop table if exists users;")
+        await conn.execute("create table if not exists users (name text);")
+        await conn.execute("insert into users values ('first@example.com');")
+        await conn.execute("insert into users values ('second@example.com');")
+        await conn.execute("insert into users values ('third@example.com');")
 
         # remote writes are buffered until you commit explicitly.
         await conn.commit()
 
         # read back what we just inserted
-        cursor = await conn.execute("SELECT * FROM users")
+        cursor = await conn.execute("select * from users")
         rows = await cursor.fetchall()
         print("Remote rows:", rows)
 

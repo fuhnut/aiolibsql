@@ -39,14 +39,14 @@ async def main():
         auth_token=os.getenv("LIBSQL_AUTH_TOKEN"),
     ) as conn:
         # create a table if it doesn't already exist
-        await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER);")
+        await conn.execute("create table if not exists users (id integer);")
         # insert a single row; placeholders and parameters could also be used
-        await conn.execute("INSERT INTO users(id) VALUES (10);")
+        await conn.execute("insert into users(id) values (10);")
         # changes are not sent remotely until we commit
         await conn.commit()
 
         # read back the inserted row and print it
-        cursor = await conn.execute("SELECT * FROM users")
+        cursor = await conn.execute("select * from users")
         print(await cursor.fetchall())
 
 
