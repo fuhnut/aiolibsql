@@ -105,9 +105,9 @@ enum ListOrTuple {
 
 fn list_or_tuple_from_bound(ob: &Bound<'_, PyAny>) -> PyResult<ListOrTuple> {
     if ob.is_instance_of::<PyList>() {
-        Ok(ListOrTuple::List(ob.downcast::<PyList>()?.clone().unbind()))
+        Ok(ListOrTuple::List(ob.cast::<PyList>()?.clone().unbind()))
     } else if ob.is_instance_of::<PyTuple>() {
-        Ok(ListOrTuple::Tuple(ob.downcast::<PyTuple>()?.clone().unbind()))
+        Ok(ListOrTuple::Tuple(ob.cast::<PyTuple>()?.clone().unbind()))
     } else {
         Err(PyValueError::new_err("expected list or tuple"))
     }
@@ -148,7 +148,7 @@ fn extract_parameters(
     }
 }
 
-fn convert_value(py: Python<'_>, value: libsql_core::Value) -> PyResult<PyObject> {
+fn convert_value(py: Python<'_>, value: libsql_core::Value) -> PyResult<Py<PyAny>> {
     match value {
         libsql_core::Value::Null => Ok(py.None()),
         libsql_core::Value::Integer(v) => Ok(v.into_pyobject(py)?.unbind().into_any()),
@@ -454,9 +454,9 @@ impl Connection {
     fn __aexit__<'py>(
         &self,
         py: Python<'py>,
-        exc_type: Option<PyObject>,
-        _exc_val: Option<PyObject>,
-        _exc_tb: Option<PyObject>,
+        exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let conn_arc = self.conn.clone();
         let is_error = exc_type.is_some();
@@ -600,7 +600,7 @@ impl Cursor {
             )
         };
         
-        let parameters_iter: Option<PyObject> = parameters.map(|p| {
+        let parameters_iter: Option<Py<PyAny>> = parameters.map(|p| {
             p.try_iter().unwrap().into_pyobject(p.py()).unwrap().into_any().unbind()
         });
         
@@ -622,7 +622,7 @@ impl Cursor {
                 
                 if let Some(iterator_obj) = parameters_iter {
                     loop {
-                        let chunk_res: PyResult<Vec<libsql_core::params::Params>> = Python::with_gil(|py| {
+                        let chunk_res: PyResult<Vec<libsql_core::params::Params>> = Python::attach(|py| {
                             let mut chunk = Vec::with_capacity(100);
                             let iter = iterator_obj.bind(py);
                             for _ in 0..100 {
@@ -690,7 +690,7 @@ impl Cursor {
     }
 
     #[getter]
-    fn description(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn description(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let guard = self.columns.lock();
         if let Some(cols) = guard.as_ref() {
             let mut elements = Vec::new();
@@ -727,7 +727,7 @@ impl Cursor {
                         vals.push(r.get_value(i).map_err(to_py_err)?);
                     }
                     drop(guard);
-                    return Python::with_gil(|py| {
+                    return Python::attach(|py| {
                         let mut py_vals = Vec::with_capacity(cc as usize);
                         for v in vals {
                             py_vals.push(convert_value(py, v)?);
@@ -736,7 +736,7 @@ impl Cursor {
                     });
                 }
             }
-            Python::with_gil(|py| Ok(py.None()))
+            Python::attach(|py| Ok(py.None()))
         })
     }
 
@@ -774,7 +774,7 @@ impl Cursor {
                 }
             }
             drop(guard);
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let mut elements = Vec::with_capacity(data.len());
                 for row in data {
                     let mut py_row = Vec::with_capacity(row.len());
@@ -804,7 +804,7 @@ impl Cursor {
                 }
             }
             drop(guard);
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let mut elements = Vec::with_capacity(data.len());
                 for row in data {
                     let mut py_row = Vec::with_capacity(row.len());
@@ -844,7 +844,7 @@ impl Cursor {
                         vals.push(r.get_value(i).map_err(to_py_err)?);
                     }
                     drop(guard);
-                    return Python::with_gil(|py| {
+                    return Python::attach(|py| {
                         let mut py_vals = Vec::with_capacity(cc as usize);
                         for v in vals {
                             py_vals.push(convert_value(py, v)?);
@@ -996,7 +996,7 @@ impl ConnectionPool {
         sql: String,
         parameters: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let parameters_iter: Option<PyObject> = parameters.map(|p| {
+        let parameters_iter: Option<Py<PyAny>> = parameters.map(|p| {
             p.try_iter().unwrap().into_pyobject(p.py()).unwrap().into_any().unbind()
         });
         
@@ -1014,7 +1014,7 @@ impl ConnectionPool {
                 
                 if let Some(iterator_obj) = parameters_iter {
                     loop {
-                        let chunk_res: PyResult<Vec<libsql_core::params::Params>> = Python::with_gil(|py| {
+                        let chunk_res: PyResult<Vec<libsql_core::params::Params>> = Python::attach(|py| {
                             let mut chunk = Vec::with_capacity(100);
                             let iter = iterator_obj.bind(py);
                             for _ in 0..100 {
@@ -1079,7 +1079,7 @@ impl ConnectionPool {
         let iter = operations.try_iter()?;
         for item in iter {
             let ob = item?;
-            let tuple = ob.downcast::<PyTuple>()?;
+            let tuple = ob.cast::<PyTuple>()?;
             let sql: String = tuple.get_item(0)?.extract()?;
             let params_obj = tuple.get_item(1)?;
             let params = if params_obj.is_none() {
@@ -1154,9 +1154,9 @@ impl ConnectionPool {
     fn __aexit__<'py>(
         &self,
         py: Python<'py>,
-        _exc_type: Option<PyObject>,
-        _exc_val: Option<PyObject>,
-        _exc_tb: Option<PyObject>,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let writer = self.writer.clone();
         let readers = self.readers.clone();
@@ -1196,7 +1196,7 @@ impl PoolCursor {
                         vals.push(r.get_value(i).map_err(to_py_err)?);
                     }
                     drop(guard);
-                    return Python::with_gil(|py| {
+                    return Python::attach(|py| {
                         let mut py_vals = Vec::with_capacity(cc as usize);
                         for v in vals {
                             py_vals.push(convert_value(py, v)?);
@@ -1205,7 +1205,7 @@ impl PoolCursor {
                     });
                 }
             }
-            Python::with_gil(|py| Ok(py.None()))
+            Python::attach(|py| Ok(py.None()))
         })
     }
 
@@ -1225,7 +1225,7 @@ impl PoolCursor {
                 }
             }
             drop(guard);
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let mut elements = Vec::with_capacity(data.len());
                 for row in data {
                     let mut py_row = Vec::with_capacity(row.len());
@@ -1273,7 +1273,7 @@ impl PoolCursor {
                 }
             }
             drop(guard);
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let mut elements = Vec::with_capacity(data.len());
                 for row in data {
                     let mut py_row = Vec::with_capacity(row.len());
@@ -1288,7 +1288,7 @@ impl PoolCursor {
     }
 
     #[getter]
-    fn description(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn description(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let guard = self.columns.lock();
         if let Some(cols) = guard.as_ref() {
             let mut elements = Vec::new();
@@ -1339,7 +1339,7 @@ impl PoolCursor {
                         vals.push(r.get_value(i).map_err(to_py_err)?);
                     }
                     drop(guard);
-                    return Python::with_gil(|py| {
+                    return Python::attach(|py| {
                         let mut py_vals = Vec::with_capacity(cc as usize);
                         for v in vals {
                             py_vals.push(convert_value(py, v)?);
