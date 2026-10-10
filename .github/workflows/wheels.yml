@@ -3,65 +3,73 @@ name: Build Wheels
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:  # Manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }} (${{ matrix.os }})
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 (glibc)
+          # Linux x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             manylinux: auto
-          # Linux x86_64 (musl - Alpine)
+
+          # Linux x86_64 musl / Alpine
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             manylinux: musllinux_1_2
-          # Linux i686 (32-bit glibc)
+
+          # Linux i686
           - os: ubuntu-latest
             target: i686-unknown-linux-gnu
             manylinux: auto
-          # Linux aarch64 (ARM64 glibc)
+
+          # Linux ARM64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             use_qemu: true
-            manylinux: manylinux_2_28
-          # Linux aarch64 (ARM64 musl - Alpine)
+            manylinux: '2_28'
+
+          # Linux ARM64 musl
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             use_qemu: true
             manylinux: musllinux_1_2
+
           # Windows x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             manylinux: auto
-          # macOS x86_64 (Intel)
-          - os: macos-14
+
+          # macOS Intel
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             manylinux: auto
-          # macOS aarch64 (Apple Silicon)
+
+          # macOS Apple Silicon
           - os: macos-latest
             target: aarch64-apple-darwin
             manylinux: auto
-          # macOS Universal2 (Fat binaries)
+
+          # macOS Universal2
           - os: macos-latest
             target: universal2-apple-darwin
             manylinux: auto
 
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU (for aarch64)
+      - name: Set up QEMU
         if: matrix.use_qemu
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: |
             3.10
@@ -74,16 +82,18 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13 3.14
           manylinux: ${{ matrix.manylinux }}
+          args: >-
+            --release
+            --out dist
+            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
 
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.target }}
           path: dist/*.whl
+          if-no-files-found: error
 
-  # Combine all wheels into one download
   collect:
     name: Collect all wheels
     needs: build
@@ -102,3 +112,4 @@ jobs:
         with:
           name: all-wheels
           path: dist/*.whl
+          if-no-files-found: error
