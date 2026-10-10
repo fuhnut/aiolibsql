@@ -479,7 +479,7 @@ impl Connection {
     }
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct Cursor {
     #[pyo3(get, set)]
@@ -1170,7 +1170,7 @@ impl ConnectionPool {
     }
 }
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PoolCursor {
     #[pyo3(get, set)]

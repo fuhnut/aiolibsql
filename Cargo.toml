@@ -8,11 +8,11 @@ name = "aiolibsql"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.27.2"
-pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
-libsql = { version = "0.9.22", features = ["encryption"]  }
-tokio = { version = "1.47.0", features = [ "rt-multi-thread", "sync" ] }
-tracing-subscriber = "0.3.19"
+pyo3 = "0.29.2"
+pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
+libsql = { version = "0.9.30", features = ["encryption"]  }
+tokio = { version = "1.53.2", features = [ "rt-multi-thread", "sync" ] }
+tracing-subscriber = "0.3.23"
 smallvec = "1.15.1"
 parking_lot = "0.12.5"
 bytes = "1.11.1"
@@ -24,4 +24,4 @@ dashmap = "6.1.0"
 [build-dependencies]
 version_check = "0.9.5"
 # used where logic has to be version/distribution specific, e.g. pypy
-pyo3-build-config = { version = "0.27.2" }
+pyo3-build-config = { version = "0.29.2" }

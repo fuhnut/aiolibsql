@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.1,<2.0"]
+requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -19,12 +19,12 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/fuhnut/aiolibsql"
-Repository = "https://github.com/fuhnut/aiolibsql"
+Homepage = "https://github.com"
+Repository = "https://github.com"
 
 [dependency-groups]
 dev = [
-    "maturin>=1.1,<2.0",
+    "maturin>=1.7,<2.0",
     "pyperf>=2.7",
     "pytest>=7",
     "pytest-asyncio>=0.21",
@@ -33,3 +33,4 @@ dev = [
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "aiolibsql"
+profile = "release"
