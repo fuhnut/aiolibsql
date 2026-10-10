@@ -110,7 +110,7 @@ pool = await aiolibsql.create_pool("bot.db", size=10)
 
 | Constant | Value |
 |---|---|
-| `aiolibsql.VERSION` | `"0.2.0"` |
+| `aiolibsql.VERSION` | `"0.2.9"` |
 | `aiolibsql.paramstyle` | `"qmark"` |
 | `aiolibsql.sqlite_version_info` | `(3, 42, 0)` |
 | `aiolibsql.LEGACY_TRANSACTION_CONTROL` | `-1` |

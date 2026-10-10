@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "aiolibsql"
-version = "0.2.8"
+version = "0.2.9"
 description = "A fully asynchronous Python wrapper for libSQL, built with Rust and PyO3"
 requires-python = ">=3.8"
 license = {text = "MIT"}
@@ -12,6 +12,7 @@ keywords = ["libsql", "sqlite", "async", "database", "turso"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.14",
     "Framework :: AsyncIO",
     "License :: OSI Approved :: MIT License",
     "Topic :: Database",
@@ -20,6 +21,14 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/fuhnut/aiolibsql"
 Repository = "https://github.com/fuhnut/aiolibsql"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.1,<2.0",
+    "pyperf>=2.7",
+    "pytest>=7",
+    "pytest-asyncio>=0.21",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

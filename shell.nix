@@ -1,17 +1,12 @@
 { pkgs ? import <nixpkgs> { } }:
 (pkgs.buildFHSUserEnv {
-  name = "pipzone";
+  name = "uvdev";
   targetPkgs = pkgs: (with pkgs; [
-    python312
-    python312Packages.pip
-    python312Packages.virtualenv
-    python312Packages.pytest
-    python312Packages.pyperf
-    maturin
+    uv
+    rustc
+    cargo
+    cmake
+    clang
   ]);
   runScript = "bash";
-  profile = ''
-    virtualenv .venv
-    source .venv/bin/activate
-  '';
 }).env

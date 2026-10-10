@@ -34,7 +34,7 @@ use tokio::sync::{
 };
 
 const LEGACY_TRANSACTION_CONTROL: i32 = -1;
-const VERSION: &str = "0.2.8";
+const VERSION: &str = "0.2.9";
 
 create_exception!(
     aiolibsql,
@@ -103,15 +103,21 @@ enum ListOrTuple {
     Tuple(Py<PyTuple>),
 }
 
-impl<'py> FromPyObject<'py> for ListOrTuple {
-    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
-        if ob.is_instance_of::<PyList>() {
-            Ok(ListOrTuple::List(ob.downcast::<PyList>()?.clone().unbind()))
-        } else if ob.is_instance_of::<PyTuple>() {
-            Ok(ListOrTuple::Tuple(ob.downcast::<PyTuple>()?.clone().unbind()))
-        } else {
-            Err(PyValueError::new_err("expected list or tuple"))
-        }
+fn list_or_tuple_from_bound(ob: &Bound<'_, PyAny>) -> PyResult<ListOrTuple> {
+    if ob.is_instance_of::<PyList>() {
+        Ok(ListOrTuple::List(ob.downcast::<PyList>()?.clone().unbind()))
+    } else if ob.is_instance_of::<PyTuple>() {
+        Ok(ListOrTuple::Tuple(ob.downcast::<PyTuple>()?.clone().unbind()))
+    } else {
+        Err(PyValueError::new_err("expected list or tuple"))
+    }
+}
+
+impl<'py> FromPyObject<'_, 'py> for ListOrTuple {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        list_or_tuple_from_bound(&ob.to_owned())
     }
 }
 
@@ -121,25 +127,21 @@ fn extract_parameters(
 ) -> PyResult<libsql_core::params::Params> {
     match parameters {
         Some(p) => {
-            let mut params = Vec::new();
-            let (len, binder) = match &p {
-                ListOrTuple::List(l) => {
-                    let b = l.bind(py);
-                    (b.len(), b.as_any())
+            let params = match p {
+                ListOrTuple::List(list) => {
+                    let list = list.bind(py);
+                    (0..list.len())
+                        .map(|i| extract_parameter(py, &list.get_item(i)?))
+                        .collect::<PyResult<Vec<_>>>()?
                 }
-                ListOrTuple::Tuple(t) => {
-                    let b = t.bind(py);
-                    (b.len(), b.as_any())
+                ListOrTuple::Tuple(tuple) => {
+                    let tuple = tuple.bind(py);
+                    (0..tuple.len())
+                        .map(|i| extract_parameter(py, &tuple.get_item(i)?))
+                        .collect::<PyResult<Vec<_>>>()?
                 }
             };
-            for i in 0..len {
-                let item = if let Ok(l) = binder.downcast::<PyList>() {
-                    l.get_item(i)?
-                } else {
-                    binder.downcast::<PyTuple>().unwrap().get_item(i)?
-                };
-                params.push(extract_parameter(py, &item)?);
-            }
+            println!("params: {:?}", params);
             Ok(libsql_core::params::Params::Positional(params))
         }
         None => Ok(libsql_core::params::Params::None),
@@ -263,7 +265,7 @@ fn connect<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let auth_token = auth_token.unwrap_or_default();
     future_into_py(py, async move {
-        let ver = "libsql-python-rpc-0.2.8";
+        let ver = "libsql-python-rpc-0.2.9";
         let encryption_config = match encryption_key {
             Some(key) => {
                 let cipher = libsql_core::Cipher::default();
@@ -546,6 +548,7 @@ impl Cursor {
                 }
                 *cols.lock() = if col_count > 0 { Some(c_names) } else { None };
                 
+                rc.store(0, Ordering::SeqCst);
                 if col_count > 0 {
                     let rs = match stmt.query(params).await {
                         Ok(r) => r,
@@ -557,15 +560,18 @@ impl Cursor {
                     *rows.lock().await = Some(rs);
                     dn.store(false, Ordering::SeqCst);
                 } else {
-                    if let Err(e) = stmt.execute(params).await {
-                        guard.rollback().await?;
-                        return Err(to_py_err(e));
-                    }
+                    let changes = match stmt.execute(params).await {
+                        Ok(changes) => changes,
+                        Err(e) => {
+                            guard.rollback().await?;
+                            return Err(to_py_err(e));
+                        }
+                    };
                     *rows.lock().await = None;
                     dn.store(true, Ordering::SeqCst);
+                    rc.store(changes as i64, Ordering::SeqCst);
                 }
                 
-                rc.store(guard.conn().changes() as i64, Ordering::SeqCst);
                 rid.store(guard.conn().last_insert_rowid(), Ordering::SeqCst);
                 guard.commit().await?;
             }
@@ -611,12 +617,6 @@ impl Cursor {
                 let is_tx = (!determine_autocommit(ac, &isl)) && stmt_is_dml(&sql);
                 let txguard = TxGuard::new(c, is_tx).await?;
                 
-                let stmt_res = txguard.conn().prepare(&sql).await;
-                if let Err(e) = stmt_res {
-                    txguard.rollback().await?;
-                    return Err(to_py_err(e));
-                }
-                let stmt = stmt_res.unwrap();
                 let mut total_changes = 0;
                 let mut last_id = 0;
                 
@@ -628,7 +628,7 @@ impl Cursor {
                             for _ in 0..100 {
                                 match iter.call_method0("__next__") {
                                     Ok(item) => {
-                                        chunk.push(extract_parameters(py, Some(ListOrTuple::extract_bound(&item)?))?);
+                                        chunk.push(extract_parameters(py, Some(list_or_tuple_from_bound(&item)?))?);
                                     }
                                     Err(e) => {
                                         if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
@@ -651,11 +651,14 @@ impl Cursor {
                         
                         if chunk.is_empty() { break; }
                         for p in chunk {
-                            if let Err(e) = stmt.execute(p).await {
-                                txguard.rollback().await?;
-                                return Err(to_py_err(e));
-                            }
-                            total_changes += txguard.conn().changes() as i64;
+                            let changes = match txguard.conn().execute(&sql, p).await {
+                                Ok(changes) => changes,
+                                Err(e) => {
+                                    txguard.rollback().await?;
+                                    return Err(to_py_err(e));
+                                }
+                            };
+                            total_changes += changes as i64;
                             last_id = txguard.conn().last_insert_rowid();
                         }
                     }
@@ -923,17 +926,17 @@ impl ConnectionPool {
                         Ok(PoolCursor {
                             rows: Arc::new(AsyncMutex::new(Some(rows))),
                             columns: Arc::new(SyncMutex::new(desc)),
-                            rowcount: conn.changes() as i64,
+                            rowcount: 0,
                             lastrowid: conn.last_insert_rowid(),
                             done: Arc::new(AtomicBool::new(false)),
                             arraysize: 1,
                         })
                     } else {
-                        stmt.execute(params).await.map_err(to_py_err)?;
+                        let changes = stmt.execute(params).await.map_err(to_py_err)?;
                         Ok(PoolCursor {
                             rows: Arc::new(AsyncMutex::new(None)),
                             columns: Arc::new(SyncMutex::new(None)),
-                            rowcount: conn.changes() as i64,
+                            rowcount: changes as i64,
                             lastrowid: conn.last_insert_rowid(),
                             done: Arc::new(AtomicBool::new(true)),
                             arraysize: 1,
@@ -963,17 +966,17 @@ impl ConnectionPool {
                         Ok(PoolCursor {
                             rows: Arc::new(AsyncMutex::new(Some(rows))),
                             columns: Arc::new(SyncMutex::new(desc)),
-                            rowcount: conn.changes() as i64,
+                            rowcount: 0,
                             lastrowid: conn.last_insert_rowid(),
                             done: Arc::new(AtomicBool::new(false)),
                             arraysize: 1,
                         })
                     } else {
-                        stmt.execute(params).await.map_err(to_py_err)?;
+                        let changes = stmt.execute(params).await.map_err(to_py_err)?;
                         Ok(PoolCursor {
                             rows: Arc::new(AsyncMutex::new(None)),
                             columns: Arc::new(SyncMutex::new(None)),
-                            rowcount: conn.changes() as i64,
+                            rowcount: changes as i64,
                             lastrowid: conn.last_insert_rowid(),
                             done: Arc::new(AtomicBool::new(true)),
                             arraysize: 1,
@@ -1006,12 +1009,6 @@ impl ConnectionPool {
             if let Some(conn) = conn_opt {
                 let txguard = TxGuard::new(conn, true).await?;
                 
-                let stmt_res = txguard.conn().prepare(&sql).await;
-                if let Err(e) = stmt_res {
-                    txguard.rollback().await?;
-                    return Err(to_py_err(e));
-                }
-                let stmt = stmt_res.unwrap();
                 let mut total_changes = 0;
                 let mut last_id = 0;
                 
@@ -1023,7 +1020,7 @@ impl ConnectionPool {
                             for _ in 0..100 {
                                 match iter.call_method0("__next__") {
                                     Ok(item) => {
-                                        chunk.push(extract_parameters(py, Some(ListOrTuple::extract_bound(&item)?))?);
+                                        chunk.push(extract_parameters(py, Some(list_or_tuple_from_bound(&item)?))?);
                                     }
                                     Err(e) => {
                                         if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
@@ -1046,11 +1043,14 @@ impl ConnectionPool {
                         
                         if chunk.is_empty() { break; }
                         for p in chunk {
-                            if let Err(e) = stmt.execute(p).await {
-                                txguard.rollback().await?;
-                                return Err(to_py_err(e));
-                            }
-                            total_changes += txguard.conn().changes() as i64;
+                            let changes = match txguard.conn().execute(&sql, p).await {
+                                Ok(changes) => changes,
+                                Err(e) => {
+                                    txguard.rollback().await?;
+                                    return Err(to_py_err(e));
+                                }
+                            };
+                            total_changes += changes as i64;
                             last_id = txguard.conn().last_insert_rowid();
                         }
                     }
@@ -1085,7 +1085,7 @@ impl ConnectionPool {
             let params = if params_obj.is_none() {
                 libsql_core::params::Params::None
             } else {
-                extract_parameters(py, Some(ListOrTuple::extract_bound(&params_obj)?))?                
+                extract_parameters(py, Some(list_or_tuple_from_bound(&params_obj)?))?
             };
             ops.push((sql, params));
         }
@@ -1108,11 +1108,15 @@ impl ConnectionPool {
                         return Err(to_py_err(e));
                     }
                     let stmt = stmt_res.unwrap();
-                    if let Err(e) = stmt.execute(params).await {
-                        txguard.rollback().await?;
-                        return Err(to_py_err(e));
-                    }
-                    total_changes += txguard.conn().changes() as i64;
+                    let changes = match stmt.execute(params).await {
+                        Ok(changes) => changes,
+                        Err(e) => {
+                            txguard.rollback().await?;
+                            return Err(to_py_err(e));
+                        }
+                    };
+                    stmt.reset();
+                    total_changes += changes as i64;
                     last_id = txguard.conn().last_insert_rowid();
                 }
                 txguard.commit().await?;

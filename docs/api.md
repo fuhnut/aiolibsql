@@ -41,7 +41,7 @@ conn = await aiolibsql.connect("secret.db", encryption_key="my-key")
 
 | Constant | Value | Description |
 |---|---|---|
-| `aiolibsql.VERSION` | `"0.1.14-stable"` | Library version |
+| `aiolibsql.VERSION` | `"0.2.9"` | Library version |
 | `aiolibsql.LEGACY_TRANSACTION_CONTROL` | `-1` | Legacy autocommit mode |
 | `aiolibsql.paramstyle` | `"qmark"` | Use `?` for parameter placeholders |
 | `aiolibsql.sqlite_version_info` | `(3, 42, 0)` | Underlying SQLite version |
