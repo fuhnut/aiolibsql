@@ -14,4 +14,4 @@ dist/
 *.dylib
 *.pyd
 testbot.py
-*.whl
+*.whlall-wheels.zip
