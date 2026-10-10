@@ -141,7 +141,6 @@ fn extract_parameters(
                         .collect::<PyResult<Vec<_>>>()?
                 }
             };
-            println!("params: {:?}", params);
             Ok(libsql_core::params::Params::Positional(params))
         }
         None => Ok(libsql_core::params::Params::None),
