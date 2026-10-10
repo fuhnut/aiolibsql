@@ -15,3 +15,4 @@ dist/
 *.pyd
 testbot.py
 *.whlall-wheels.zip
+zed/
